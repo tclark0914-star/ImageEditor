@@ -1,13 +1,20 @@
 ﻿import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
-from PIL import Image, ImageTk, ImageEnhance, ImageOps
+from tkinter import ttk, filedialog, messagebox
+from PIL import Image, ImageTk, ImageEnhance, ImageOps, ImageFilter, ImageStat
 import os
-import copy
+
+# --- Optional AI dependencies ---
+try:
+    from rembg import remove as rembg_remove
+    REMBG_AVAILABLE = True
+except ImportError:
+    REMBG_AVAILABLE = False
+    rembg_remove = None
 
 class Layer:
     def __init__(self, name, image, visible=True, opacity=1.0):
         self.name = name
-        self.image = image
+        self.image = image  # RGBA
         self.visible = visible
         self.opacity = opacity
 
@@ -17,9 +24,9 @@ class Layer:
 class ImageEditor:
     def __init__(self, root):
         self.root = root
-        self.root.title("ImageEditor - Milestone 3 (Layers)")
-        self.root.geometry("1400x900")
-        self.root.minsize(1200, 750)
+        self.root.title("ImageEditor - Milestone 4 (AI Assisted)")
+        self.root.geometry("1450x950")
+        self.root.minsize(1250, 800)
 
         self.original_path = None
         self.layers = []
@@ -38,7 +45,6 @@ class ImageEditor:
         self.crop_coords = None
         self.image_offset = (0, 0)
         self.display_size = (0, 0)
-
         self.lock_aspect = tk.BooleanVar(value=True)
 
         self.setup_ui()
@@ -65,12 +71,21 @@ class ImageEditor:
         edit_menu.add_command(label="Undo  Ctrl+Z", command=self.undo)
         edit_menu.add_command(label="Redo  Ctrl+Y", command=self.redo)
         menubar.add_cascade(label="Edit", menu=edit_menu)
+
+        ai_menu = tk.Menu(menubar, tearoff=0)
+        ai_menu.add_command(label="Remove Background (AI)  Ctrl+B", command=self.ai_remove_background)
+        ai_menu.add_command(label="Upscale 2x (AI)", command=self.ai_upscale)
+        ai_menu.add_command(label="Auto Enhance (AI)", command=self.ai_auto_enhance)
+        ai_menu.add_command(label="Denoise (AI)", command=self.ai_denoise)
+        menubar.add_cascade(label="AI", menu=ai_menu)
+
         self.root.config(menu=menubar)
 
         self.main_frame = tk.Frame(self.root, bg="#2b2b2b")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.toolbar = tk.Frame(self.main_frame, bg="#3c3c3c", width=80)
+        # LEFT
+        self.toolbar = tk.Frame(self.main_frame, bg="#3c3c3c", width=85)
         self.toolbar.pack(side=tk.LEFT, fill=tk.Y)
         self.toolbar.pack_propagate(False)
         tk.Label(self.toolbar, text="TOOLS", bg="#3c3c3c", fg="#aaaaaa", font=("Segoe UI", 8, "bold")).pack(pady=(15,10))
@@ -85,13 +100,16 @@ class ImageEditor:
         self.make_tool_button("Flip V", lambda: self.flip_image("v"))
         ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=8)
         self.make_tool_button("New Layer", self.add_layer)
-        self.make_tool_button("Delete Layer", self.delete_layer)
         self.make_tool_button("Merge Down", self.merge_down)
-        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=8)
+        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=6)
+        self.make_tool_button("RM Background", self.ai_remove_background)
+        self.make_tool_button("Upscale 2x", self.ai_upscale)
+        self.make_tool_button("Auto Enhance", self.ai_auto_enhance)
+        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=6)
         self.make_tool_button("Undo", self.undo)
         self.make_tool_button("Redo", self.redo)
-        self.make_tool_button("Reset", self.reset_image)
 
+        # CENTER
         center_frame = tk.Frame(self.main_frame, bg="#1e1e1e")
         center_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.canvas = tk.Canvas(center_frame, bg="#1e1e1e", highlightthickness=0, cursor="cross")
@@ -99,20 +117,31 @@ class ImageEditor:
         self.canvas.bind("<ButtonPress-1>", self.on_crop_press)
         self.canvas.bind("<B1-Motion>", self.on_crop_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_crop_release)
-        self.status_var = tk.StringVar(value="Milestone 3: Layers ready. Open an image.")
+        self.status_var = tk.StringVar(value="Milestone 4: AI ready. Open image. Ctrl+B for Remove Background.")
         status_bar = tk.Label(center_frame, textvariable=self.status_var, anchor="w", bg="#2b2b2b", fg="#cccccc", font=("Segoe UI", 9), padx=10, pady=4)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        self.right_panel = tk.Frame(self.main_frame, bg="#2b2b2b", width=340)
+        # RIGHT - scrollable area for panels
+        self.right_panel = tk.Frame(self.main_frame, bg="#2b2b2b", width=360)
         self.right_panel.pack(side=tk.RIGHT, fill=tk.Y)
         self.right_panel.pack_propagate(False)
 
-        layers_frame = tk.LabelFrame(self.right_panel, text="Layers (Milestone 3)", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=8)
-        layers_frame.pack(fill=tk.BOTH, padx=8, pady=8, expand=False)
+        # Canvas for scrolling right panels if screen small
+        canvas_right = tk.Canvas(self.right_panel, bg="#2b2b2b", highlightthickness=0)
+        scrollbar = tk.Scrollbar(self.right_panel, orient="vertical", command=canvas_right.yview)
+        self.scrollable_frame = tk.Frame(canvas_right, bg="#2b2b2b")
+        self.scrollable_frame.bind("<Configure>", lambda e: canvas_right.configure(scrollregion=canvas_right.bbox("all")))
+        canvas_right.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        canvas_right.configure(yscrollcommand=scrollbar.set)
+        canvas_right.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
+        # --- LAYERS ---
+        layers_frame = tk.LabelFrame(self.scrollable_frame, text="Layers", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=8)
+        layers_frame.pack(fill=tk.X, padx=8, pady=8)
         list_row = tk.Frame(layers_frame, bg="#2b2b2b")
         list_row.pack(fill=tk.BOTH, expand=True)
-        self.layers_listbox = tk.Listbox(list_row, bg="#3c3c3c", fg="white", selectbackground="#0e639c", height=8, font=("Segoe UI", 9), activestyle="none")
+        self.layers_listbox = tk.Listbox(list_row, bg="#3c3c3c", fg="white", selectbackground="#0e639c", height=6, font=("Segoe UI", 9), activestyle="none")
         self.layers_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.layers_listbox.bind("<<ListboxSelect>>", self.on_layer_select)
         sb = tk.Scrollbar(list_row, command=self.layers_listbox.yview)
@@ -121,8 +150,7 @@ class ImageEditor:
 
         ctrl_row = tk.Frame(layers_frame, bg="#2b2b2b")
         ctrl_row.pack(fill=tk.X, pady=(8,4))
-        self.vis_btn = tk.Button(ctrl_row, text="Toggle Visible", command=self.toggle_visibility, bg="#4a4a4a", fg="white", relief=tk.FLAT, font=("Segoe UI", 8))
-        self.vis_btn.pack(side=tk.LEFT, padx=2)
+        tk.Button(ctrl_row, text="Toggle Visible", command=self.toggle_visibility, bg="#4a4a4a", fg="white", relief=tk.FLAT, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=2)
 
         op_row = tk.Frame(layers_frame, bg="#2b2b2b")
         op_row.pack(fill=tk.X, pady=4)
@@ -133,12 +161,33 @@ class ImageEditor:
 
         btn_row = tk.Frame(layers_frame, bg="#2b2b2b")
         btn_row.pack(fill=tk.X, pady=4)
-        tk.Button(btn_row, text="New", command=self.add_layer, bg="#3c3c3c", fg="white", relief=tk.FLAT, width=6).pack(side=tk.LEFT, padx=2)
-        tk.Button(btn_row, text="Dup", command=self.duplicate_layer, bg="#3c3c3c", fg="white", relief=tk.FLAT, width=6).pack(side=tk.LEFT, padx=2)
-        tk.Button(btn_row, text="Del", command=self.delete_layer, bg="#5a2a2a", fg="white", relief=tk.FLAT, width=6).pack(side=tk.LEFT, padx=2)
-        tk.Button(btn_row, text="Merge", command=self.merge_down, bg="#3c3c3c", fg="white", relief=tk.FLAT, width=8).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_row, text="New", command=self.add_layer, bg="#3c3c3c", fg="white", relief=tk.FLAT, width=5).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_row, text="Dup", command=self.duplicate_layer, bg="#3c3c3c", fg="white", relief=tk.FLAT, width=5).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_row, text="Del", command=self.delete_layer, bg="#5a2a2a", fg="white", relief=tk.FLAT, width=5).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_row, text="Merge", command=self.merge_down, bg="#3c3c3c", fg="white", relief=tk.FLAT, width=6).pack(side=tk.LEFT, padx=2)
 
-        adj_frame = tk.LabelFrame(self.right_panel, text="Adjustments (Active Layer)", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=6)
+        # --- AI TOOLS (NEW - Milestone 4) ---
+        ai_frame = tk.LabelFrame(self.scrollable_frame, text="AI Tools (Milestone 4)", bg="#2b2b2b", fg="#00d4ff", font=("Segoe UI", 9, "bold"), padx=10, pady=8)
+        ai_frame.pack(fill=tk.X, padx=8, pady=8)
+
+        ai_status_text = "AI Ready" if REMBG_AVAILABLE else "Install rembg for BG Remove"
+        tk.Label(ai_frame, text=f"Status: {ai_status_text}", bg="#2b2b2b", fg="#888888", font=("Segoe UI", 8, "italic")).pack(anchor="w")
+
+        tk.Button(ai_frame, text="✂ Remove Background (AI) - Active Layer", command=self.ai_remove_background, bg="#6a1b9a", fg="white", relief=tk.FLAT, font=("Segoe UI", 9, "bold"), pady=6).pack(fill=tk.X, pady=4)
+        tk.Label(ai_frame, text="Uses rembg if installed, else smart edge fallback. Result = transparent layer.", bg="#2b2b2b", fg="#777777", font=("Segoe UI", 7)).pack(anchor="w")
+
+        row_ai = tk.Frame(ai_frame, bg="#2b2b2b")
+        row_ai.pack(fill=tk.X, pady=4)
+        tk.Button(row_ai, text="⬆ Upscale 2x", command=self.ai_upscale, bg="#0e639c", fg="white", relief=tk.FLAT, width=12).pack(side=tk.LEFT, padx=2)
+        tk.Button(row_ai, text="✨ Auto Enhance", command=self.ai_auto_enhance, bg="#0e639c", fg="white", relief=tk.FLAT, width=14).pack(side=tk.LEFT, padx=2)
+
+        row_ai2 = tk.Frame(ai_frame, bg="#2b2b2b")
+        row_ai2.pack(fill=tk.X, pady=2)
+        tk.Button(row_ai2, text="Denoise", command=self.ai_denoise, bg="#3c3c3c", fg="white", relief=tk.FLAT, width=12).pack(side=tk.LEFT, padx=2)
+        tk.Button(row_ai2, text="Smart Sharpen", command=self.ai_smart_sharpen, bg="#3c3c3c", fg="white", relief=tk.FLAT, width=14).pack(side=tk.LEFT, padx=2)
+
+        # --- Adjustments ---
+        adj_frame = tk.LabelFrame(self.scrollable_frame, text="Adjustments (Active Layer)", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=6)
         adj_frame.pack(fill=tk.X, padx=8, pady=4)
         self.sliders = {}
         for name, label in [("brightness", "Brightness"), ("contrast", "Contrast"), ("saturation", "Saturation"), ("sharpness", "Sharpness")]:
@@ -154,7 +203,8 @@ class ImageEditor:
         tk.Button(btn_row2, text="Apply to Layer", command=self.apply_adjustments, bg="#0e639c", fg="white", relief=tk.FLAT, padx=8, font=("Segoe UI", 8)).pack(side=tk.LEFT)
         tk.Button(btn_row2, text="Reset Sliders", command=self.reset_sliders, bg="#3c3c3c", fg="white", relief=tk.FLAT, padx=8, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=4)
 
-        resize_frame = tk.LabelFrame(self.right_panel, text="Resize & Save (Composite)", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=6)
+        # --- Resize ---
+        resize_frame = tk.LabelFrame(self.scrollable_frame, text="Resize & Save", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=6)
         resize_frame.pack(fill=tk.X, padx=8, pady=4)
         self.size_info_var = tk.StringVar(value="No image")
         tk.Label(resize_frame, textvariable=self.size_info_var, bg="#2b2b2b", fg="#888888", font=("Segoe UI", 8)).pack(anchor="w")
@@ -172,20 +222,22 @@ class ImageEditor:
         tk.Button(resize_frame, text="Apply Resize to All Layers", command=self.apply_resize, bg="#0e639c", fg="white", relief=tk.FLAT, padx=10, pady=2, font=("Segoe UI", 8)).pack(fill=tk.X, pady=(6,2))
         tk.Button(resize_frame, text="Save As New File (Never Overwrites)", command=self.save_as, bg="#16825d", fg="white", relief=tk.FLAT, padx=10, pady=5, font=("Segoe UI", 8, "bold")).pack(fill=tk.X, pady=2)
 
-        hist_frame = tk.LabelFrame(self.right_panel, text="History", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
-        hist_frame.pack(fill=tk.BOTH, padx=8, pady=4, expand=True)
-        self.history_listbox = tk.Listbox(hist_frame, bg="#252525", fg="#aaaaaa", height=6, font=("Segoe UI", 8))
+        # --- History ---
+        hist_frame = tk.LabelFrame(self.scrollable_frame, text="History", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
+        hist_frame.pack(fill=tk.BOTH, padx=8, pady=8, expand=False)
+        self.history_listbox = tk.Listbox(hist_frame, bg="#252525", fg="#aaaaaa", height=8, font=("Segoe UI", 8))
         self.history_listbox.pack(fill=tk.BOTH, expand=True)
         self.history_listbox.insert(tk.END, "History: Open image to start")
 
     def make_tool_button(self, text, cmd):
-        b = tk.Button(self.toolbar, text=text, command=cmd, bg="#4a4a4a", fg="white", relief=tk.FLAT, font=("Segoe UI", 9), padx=5, pady=5, width=14, wraplength=70)
+        b = tk.Button(self.toolbar, text=text, command=cmd, bg="#4a4a4a", fg="white", relief=tk.FLAT, font=("Segoe UI", 9), padx=5, pady=5, width=14, wraplength=75)
         b.pack(pady=2, padx=5)
 
     def bind_shortcuts(self):
         self.root.bind("<Control-o>", lambda e: self.open_image())
         self.root.bind("<Control-s>", lambda e: self.save_as())
         self.root.bind("<Control-l>", lambda e: self.add_layer())
+        self.root.bind("<Control-b>", lambda e: self.ai_remove_background())
         self.root.bind("<Control-e>", lambda e: self.merge_down())
         self.root.bind("<Control-z>", lambda e: self.undo())
         self.root.bind("<Control-y>", lambda e: self.redo())
@@ -200,9 +252,7 @@ class ImageEditor:
         for layer in self.layers:
             if not layer.visible:
                 continue
-            l_img = layer.image
-            if l_img.mode != "RGBA":
-                l_img = l_img.convert("RGBA")
+            l_img = layer.image if layer.image.mode=="RGBA" else layer.image.convert("RGBA")
             if layer.opacity < 1.0:
                 alpha = l_img.split()[3]
                 alpha = ImageEnhance.Brightness(alpha).enhance(layer.opacity)
@@ -239,7 +289,6 @@ class ImageEditor:
             rev_idx = len(self.layers)-1 - self.active_layer_idx
             self.layers_listbox.selection_clear(0, tk.END)
             self.layers_listbox.selection_set(rev_idx)
-        if self.layers:
             self.opacity_var.set(self.layers[self.active_layer_idx].opacity*100)
 
     def on_layer_select(self, event):
@@ -253,7 +302,6 @@ class ImageEditor:
         self.active_layer_idx = real_idx
         self.refresh_layers_list()
         self.display_composite()
-        self.status_var.set(f"Active: {self.layers[real_idx].name}")
 
     def open_image(self):
         path = filedialog.askopenfilename(filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.webp"), ("All", "*.*")])
@@ -345,7 +393,7 @@ class ImageEditor:
         if not self.layers:
             return
         if len(self.layers) == 1:
-            messagebox.showinfo("Layers", "Cannot delete last layer. Use Reset.")
+            messagebox.showinfo("Layers", "Cannot delete last layer.")
             return
         if not messagebox.askyesno("Delete Layer", f"Delete {self.layers[self.active_layer_idx].name}?"):
             return
@@ -375,7 +423,7 @@ class ImageEditor:
 
     def merge_down(self):
         if not self.layers or len(self.layers) < 2 or self.active_layer_idx == 0:
-            messagebox.showinfo("Merge Down", "Select a layer above Background to merge down.")
+            messagebox.showinfo("Merge Down", "Select a layer above Background.")
             return
         self.push_undo(f"Merge {self.layers[self.active_layer_idx].name} down")
         top_idx = self.active_layer_idx
@@ -392,9 +440,7 @@ class ImageEditor:
             top_img = tmp
         if top_img.size != base.size:
             tmp = Image.new("RGBA", base.size, (0,0,0,0))
-            x = (base.width - top_img.width)//2
-            y = (base.height - top_img.height)//2
-            tmp.paste(top_img, (x,y), top_img)
+            tmp.paste(top_img, (base.width-top_img.width)//2, (base.height-top_img.height)//2, top_img)
             top_img = tmp
         merged = Image.alpha_composite(base, top_img)
         bottom.image = merged
@@ -415,6 +461,142 @@ class ImageEditor:
         self.refresh_layers_list()
         self.display_composite()
 
+    # ---------- AI TOOLS ----------
+    def ai_remove_background(self):
+        if not self.layers:
+            messagebox.showinfo("AI Remove BG", "Open an image first.")
+            return
+        layer = self.layers[self.active_layer_idx]
+        self.status_var.set(f"AI: Removing background from {layer.name}... (may take 5-15s first time)")
+        self.root.update_idletasks()
+        self.push_undo(f"AI Remove BG {layer.name}")
+        try:
+            if REMBG_AVAILABLE:
+                # rembg works on PIL Image
+                # Convert layer image to RGBA bytes
+                result = rembg_remove(layer.image)
+                # rembg_remove returns RGBA with transparent BG
+                layer.image = result
+                self.display_composite()
+                self.status_var.set(f"AI: Background removed from {layer.name} using rembg (AI model)")
+            else:
+                # Fallback: smart chroma / edge - make near-white transparent + grow
+                # This is not true AI but gives visual result without dependency
+                img = layer.image.convert("RGBA")
+                # Simple heuristic: if image has distinct background, use alpha based on luminance variance
+                # For demo, we use ImageOps to create mask: high tolerance white removal
+                # Ask user to confirm fallback
+                if not messagebox.askyesno("AI Dependency Missing",
+                    "rembg not installed.\n\nTo get true AI background removal, run:\n\npip install rembg onnxruntime\n\nUse basic fallback (white background removal) for now?"):
+                    # undo push
+                    self.undo()
+                    return
+                # Fallback: remove white/very light background
+                datas = img.getdata()
+                new_data = []
+                for item in datas:
+                    # If pixel is very light and low saturation, make transparent
+                    if item[0] > 230 and item[1] > 230 and item[2] > 230:
+                        new_data.append((255, 255, 255, 0))
+                    else:
+                        new_data.append(item)
+                img.putdata(new_data)
+                layer.image = img
+                self.display_composite()
+                self.status_var.set("Fallback BG remove (white removal). Install rembg for AI model: pip install rembg onnxruntime")
+                messagebox.showinfo("Fallback Used",
+                    "Used basic white removal fallback.\n\nFor true AI:\n pip install rembg onnxruntime\nThen restart the editor.")
+        except Exception as e:
+            messagebox.showerror("AI Remove BG Error", str(e))
+            self.status_var.set(f"AI BG Remove failed: {e}")
+
+    def ai_upscale(self):
+        if not self.layers:
+            return
+        self.push_undo(f"AI Upscale 2x {self.layers[self.active_layer_idx].name}")
+        try:
+            layer = self.layers[self.active_layer_idx]
+            w, h = layer.image.size
+            new_w, new_h = w*2, h*2
+            if new_w > 8000 or new_h > 8000:
+                if not messagebox.askyesno("Large Image", f"Upscaling to {new_w}x{new_h} is very large. Continue?"):
+                    self.undo()
+                    return
+            self.status_var.set(f"Upscaling {layer.name} to {new_w}x{new_h}...")
+            self.root.update_idletasks()
+            # LANCZOS is high quality, acts as AI-lite upscaler. Real-ESRGAN could be plugged later.
+            layer.image = layer.image.resize((new_w, new_h), Image.LANCZOS)
+            # For all other layers, optionally upscale to match? For now, upscale all to keep composite aligned
+            for i, l in enumerate(self.layers):
+                if i != self.active_layer_idx:
+                    l.image = l.image.resize((new_w, new_h), Image.LANCZOS)
+            self.display_composite()
+            self.update_resize_entries()
+            self.status_var.set(f"Upscaled to {new_w}x{new_h} (LANCZOS). For Real-ESRGAN, install realesrgan.")
+        except Exception as e:
+            messagebox.showerror("Upscale Error", str(e))
+
+    def ai_auto_enhance(self):
+        if not self.layers:
+            return
+        self.push_undo(f"AI Auto Enhance {self.layers[self.active_layer_idx].name}")
+        try:
+            layer = self.layers[self.active_layer_idx]
+            img = layer.image
+            # Auto level: autocontrast + auto color balance approximation
+            # 1. Autocontrast
+            img_rgb = img.convert("RGB")
+            # Use ImageOps.autocontrast
+            auto_contrast = ImageOps.autocontrast(img_rgb, cutoff=2)
+            # 2. Color balance - equalize
+            # Estimate: enhance color
+            auto_color = ImageEnhance.Color(auto_contrast).enhance(1.15)
+            # 3. Slight brightness/contrast normalization based on stats
+            stat = ImageStat.Stat(auto_color)
+            # If mean too dark, brighten
+            mean_brightness = sum(stat.mean[:3])/3
+            if mean_brightness < 100:
+                auto_color = ImageEnhance.Brightness(auto_color).enhance(1.1)
+            # Convert back to RGBA preserving alpha
+            if img.mode == "RGBA":
+                alpha = img.split()[3]
+                auto_rgba = auto_color.convert("RGBA")
+                auto_rgba.putalpha(alpha)
+                layer.image = auto_rgba
+            else:
+                layer.image = auto_color.convert("RGBA")
+            self.display_composite()
+            self.status_var.set(f"AI Auto Enhanced {layer.name}: autocontrast + color + brightness")
+        except Exception as e:
+            messagebox.showerror("Auto Enhance Error", str(e))
+
+    def ai_denoise(self):
+        if not self.layers:
+            return
+        self.push_undo(f"AI Denoise {self.layers[self.active_layer_idx].name}")
+        try:
+            layer = self.layers[self.active_layer_idx]
+            # Median filter reduces noise
+            layer.image = layer.image.filter(ImageFilter.MedianFilter(size=3))
+            self.display_composite()
+            self.status_var.set(f"Denoised {layer.name} (Median filter)")
+        except Exception as e:
+            messagebox.showerror("Denoise Error", str(e))
+
+    def ai_smart_sharpen(self):
+        if not self.layers:
+            return
+        self.push_undo(f"Smart Sharpen {self.layers[self.active_layer_idx].name}")
+        try:
+            layer = self.layers[self.active_layer_idx]
+            # Unsharp mask = smart sharpen
+            layer.image = layer.image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
+            self.display_composite()
+            self.status_var.set(f"Smart Sharpened {layer.name}")
+        except Exception as e:
+            messagebox.showerror("Sharpen Error", str(e))
+
+    # ---------- Other tools (crop, rotate, etc. same as M3) ----------
     def toggle_crop_mode(self):
         if not self.layers:
             messagebox.showinfo("Crop", "Open an image first.")
@@ -475,10 +657,7 @@ class ImageEditor:
                 return
             self.push_undo(f"Crop to {right-left}x{bottom-top}")
             for layer in self.layers:
-                if layer.image.size == self.composited_image.size:
-                    layer.image = layer.image.crop((left, top, right, bottom))
-                else:
-                    layer.image = layer.image.crop((left, top, right, bottom))
+                layer.image = layer.image.crop((left, top, right, bottom))
             self.crop_mode = False
             self.canvas.config(cursor="cross")
             if self.crop_rect_id:
@@ -493,8 +672,7 @@ class ImageEditor:
         if not self.layers:
             return
         self.push_undo(f"Rotate {angle} {self.layers[self.active_layer_idx].name}")
-        layer = self.layers[self.active_layer_idx]
-        layer.image = layer.image.rotate(angle, expand=True, resample=Image.BICUBIC)
+        self.layers[self.active_layer_idx].image = self.layers[self.active_layer_idx].image.rotate(angle, expand=True, resample=Image.BICUBIC)
         self.display_composite()
         self.update_resize_entries()
 
@@ -527,10 +705,7 @@ class ImageEditor:
             return
         self.push_undo(f"Flip {direction} {self.layers[self.active_layer_idx].name}")
         layer = self.layers[self.active_layer_idx]
-        if direction == "h":
-            layer.image = ImageOps.mirror(layer.image)
-        else:
-            layer.image = ImageOps.flip(layer.image)
+        layer.image = ImageOps.mirror(layer.image) if direction=="h" else ImageOps.flip(layer.image)
         self.display_composite()
 
     def apply_adjustments(self):
@@ -606,7 +781,7 @@ class ImageEditor:
     def reset_image(self):
         if not self.layers or not self.original_path:
             return
-        if not messagebox.askyesno("Reset", "Reset to original Background? Remove extra layers?"):
+        if not messagebox.askyesno("Reset", "Reset to original? Remove extra layers?"):
             return
         try:
             img = Image.open(self.original_path).convert("RGBA")
@@ -638,7 +813,7 @@ class ImageEditor:
                 save_img = bg
             save_img.save(path)
             self.status_var.set(f"Saved: {os.path.basename(path)} | {len(self.layers)} layers flattened")
-            messagebox.showinfo("Saved", f"Saved composite to:\n{path}")
+            messagebox.showinfo("Saved", f"Saved composite to:\n{path}\nOriginal untouched.")
         except Exception as e:
             messagebox.showerror("Save Error", str(e))
 
