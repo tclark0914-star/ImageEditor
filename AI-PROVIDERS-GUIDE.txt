@@ -1,0 +1,57 @@
+
+TIER 5.1 - ComfyUI + Automatic1111 Integration
+
+NEW PROVIDERS ADDED:
+
+1. Automatic1111 WebUI (LOCAL - BEST FOR YOU)
+   - URL: http://127.0.0.1:7860
+   - Setup: 
+     * Download from https://github.com/AUTOMATIC1111/stable-diffusion-webui
+     * Run: webui.bat --api --listen  (Windows)
+     * Or: ./webui.sh --api --listen  (Linux/Mac)
+   - No API key needed!
+   - Uses your GPU, fast, private, no watermark
+   - In ImageEditor: Select "Automatic1111 WebUI" in AI Engine dropdown
+
+2. ComfyUI (LOCAL - ADVANCED)
+   - URL: http://127.0.0.1:8188
+   - Setup:
+     * Download from https://github.com/comfyanonymous/ComfyUI
+     * Download model v1-5-pruned-emaonly.ckpt
+     * Run: python main.py --listen
+   - No API key, advanced node workflows
+
+3. Pollinations (FREE ONLINE - NO INSTALL)
+   - No setup, works immediately
+   - No watermark, unlimited
+   - URL: https://image.pollinations.ai
+
+HOW TO ADD MORE GENERATORS LATER:
+
+Option A: No coding - Use UI
+  AI Menu -> Manage AI Providers -> Add Custom API Provider
+  Enter: Name + URL with {prompt}, {width}, {height} placeholders
+  Example URL: https://myapi.com/generate?prompt={prompt}&w={width}&h={height}
+
+Option B: Python plugin (more control)
+  1. Open ai_generators folder: AI Menu -> Open ai_generators Folder
+  2. Create new file: my_generator.py
+  3. Copy template from _example_plugin.py
+  4. Implement generate function that returns PIL Image
+  5. Restart app - your provider appears in list!
+
+WATERMARK REMOVED:
+- Procedural demo now generates CLEAN images, no text overlay
+- All online providers (Pollinations, HF) also have no watermark (nologo=true)
+- Only A1111/ComfyUI might have watermark if model adds it - disable in negative prompt
+
+CONFIG FILE:
+~/.imageeditor_ai.json stores:
+- openai_key
+- hf_token
+- stability_key
+- replicate_key
+- a1111_url (custom URL for A1111)
+- comfy_url (custom URL for ComfyUI)
+- providers_enabled (which providers are checked)
+- custom_providers (your added custom APIs)

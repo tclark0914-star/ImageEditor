@@ -1,2 +1,9 @@
-.venv/
+﻿# Python
 __pycache__/
+*.py[cod]
+.venv/
+ai_generators/__pycache__/
+*.png
+!nigeria_super_eagles_goal.png
+.imageeditor_ai.json
+.vscode/
