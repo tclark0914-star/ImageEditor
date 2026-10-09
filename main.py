@@ -1,44 +1,50 @@
 ﻿import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 from PIL import Image, ImageTk, ImageEnhance, ImageOps
 import os
 import copy
 
+class Layer:
+    def __init__(self, name, image, visible=True, opacity=1.0):
+        self.name = name
+        self.image = image
+        self.visible = visible
+        self.opacity = opacity
+
+    def copy(self):
+        return Layer(self.name, self.image.copy(), self.visible, self.opacity)
+
 class ImageEditor:
     def __init__(self, root):
         self.root = root
-        self.root.title("ImageEditor - Milestone 2")
-        self.root.geometry("1300x850")
-        self.root.minsize(1100, 700)
+        self.root.title("ImageEditor - Milestone 3 (Layers)")
+        self.root.geometry("1400x900")
+        self.root.minsize(1200, 750)
 
-        # Image state
         self.original_path = None
-        self.original_image = None  # Never modified - for "save as new"
-        self.current_image = None   # Working image (PIL)
-        self.photo = None           # Tk image for display
+        self.layers = []
+        self.active_layer_idx = 0
+        self.composited_image = None
+        self.photo = None
         self.zoom = 1.0
 
-        # Undo/Redo - stores copies of PIL Images
         self.undo_stack = []
         self.redo_stack = []
         self.max_undo = 20
 
-        # Crop state
         self.crop_mode = False
         self.crop_start = None
         self.crop_rect_id = None
-        self.crop_coords = None  # in canvas coords
-        self.image_offset = (0, 0)  # where image is drawn on canvas
+        self.crop_coords = None
+        self.image_offset = (0, 0)
         self.display_size = (0, 0)
 
-        # Resize lock
         self.lock_aspect = tk.BooleanVar(value=True)
 
         self.setup_ui()
         self.bind_shortcuts()
 
     def setup_ui(self):
-        # --- Top Menu ---
         menubar = tk.Menu(self.root)
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="Open Image...  Ctrl+O", command=self.open_image)
@@ -47,219 +53,385 @@ class ImageEditor:
         file_menu.add_command(label="Exit", command=self.root.quit)
         menubar.add_cascade(label="File", menu=file_menu)
 
+        layer_menu = tk.Menu(menubar, tearoff=0)
+        layer_menu.add_command(label="New Layer  Ctrl+L", command=self.add_layer)
+        layer_menu.add_command(label="Duplicate Layer", command=self.duplicate_layer)
+        layer_menu.add_command(label="Delete Layer  Del", command=self.delete_layer)
+        layer_menu.add_command(label="Merge Down  Ctrl+E", command=self.merge_down)
+        layer_menu.add_command(label="Flatten Image", command=self.flatten_image)
+        menubar.add_cascade(label="Layer", menu=layer_menu)
+
         edit_menu = tk.Menu(menubar, tearoff=0)
         edit_menu.add_command(label="Undo  Ctrl+Z", command=self.undo)
         edit_menu.add_command(label="Redo  Ctrl+Y", command=self.redo)
         menubar.add_cascade(label="Edit", menu=edit_menu)
         self.root.config(menu=menubar)
 
-        # --- Main Layout: Toolbar | Canvas | Right Panels ---
         self.main_frame = tk.Frame(self.root, bg="#2b2b2b")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # LEFT TOOLBAR - Photoshop style
         self.toolbar = tk.Frame(self.main_frame, bg="#3c3c3c", width=80)
         self.toolbar.pack(side=tk.LEFT, fill=tk.Y)
         self.toolbar.pack_propagate(False)
-
         tk.Label(self.toolbar, text="TOOLS", bg="#3c3c3c", fg="#aaaaaa", font=("Segoe UI", 8, "bold")).pack(pady=(15,10))
-
         self.make_tool_button("Open", self.open_image)
         self.make_tool_button("Crop Mode", self.toggle_crop_mode)
         self.make_tool_button("Apply Crop", self.apply_crop)
         ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=8)
-
-        self.make_tool_button("↺ 90° Left", lambda: self.rotate_image(-90))
-        self.make_tool_button("↻ 90° Right", lambda: self.rotate_image(90))
+        self.make_tool_button("90 Left", lambda: self.rotate_image(-90))
+        self.make_tool_button("90 Right", lambda: self.rotate_image(90))
         self.make_tool_button("Rotate...", self.rotate_custom_dialog)
         self.make_tool_button("Flip H", lambda: self.flip_image("h"))
         self.make_tool_button("Flip V", lambda: self.flip_image("v"))
-
+        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=8)
+        self.make_tool_button("New Layer", self.add_layer)
+        self.make_tool_button("Delete Layer", self.delete_layer)
+        self.make_tool_button("Merge Down", self.merge_down)
         ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=8)
         self.make_tool_button("Undo", self.undo)
         self.make_tool_button("Redo", self.redo)
         self.make_tool_button("Reset", self.reset_image)
 
-        # CENTER - Image Canvas
         center_frame = tk.Frame(self.main_frame, bg="#1e1e1e")
         center_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         self.canvas = tk.Canvas(center_frame, bg="#1e1e1e", highlightthickness=0, cursor="cross")
         self.canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
         self.canvas.bind("<ButtonPress-1>", self.on_crop_press)
         self.canvas.bind("<B1-Motion>", self.on_crop_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_crop_release)
-
-        # Bottom status
-        self.status_var = tk.StringVar(value="Open an image to start. Milestone 2 ready.")
+        self.status_var = tk.StringVar(value="Milestone 3: Layers ready. Open an image.")
         status_bar = tk.Label(center_frame, textvariable=self.status_var, anchor="w", bg="#2b2b2b", fg="#cccccc", font=("Segoe UI", 9), padx=10, pady=4)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        # RIGHT PANELS
-        self.right_panel = tk.Frame(self.main_frame, bg="#2b2b2b", width=300)
+        self.right_panel = tk.Frame(self.main_frame, bg="#2b2b2b", width=340)
         self.right_panel.pack(side=tk.RIGHT, fill=tk.Y)
         self.right_panel.pack_propagate(False)
 
-        # --- Adjustments Panel ---
-        adj_frame = tk.LabelFrame(self.right_panel, text="Adjustments", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=10)
-        adj_frame.pack(fill=tk.X, padx=8, pady=8)
+        layers_frame = tk.LabelFrame(self.right_panel, text="Layers (Milestone 3)", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=8)
+        layers_frame.pack(fill=tk.BOTH, padx=8, pady=8, expand=False)
 
+        list_row = tk.Frame(layers_frame, bg="#2b2b2b")
+        list_row.pack(fill=tk.BOTH, expand=True)
+        self.layers_listbox = tk.Listbox(list_row, bg="#3c3c3c", fg="white", selectbackground="#0e639c", height=8, font=("Segoe UI", 9), activestyle="none")
+        self.layers_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.layers_listbox.bind("<<ListboxSelect>>", self.on_layer_select)
+        sb = tk.Scrollbar(list_row, command=self.layers_listbox.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.layers_listbox.config(yscrollcommand=sb.set)
+
+        ctrl_row = tk.Frame(layers_frame, bg="#2b2b2b")
+        ctrl_row.pack(fill=tk.X, pady=(8,4))
+        self.vis_btn = tk.Button(ctrl_row, text="Toggle Visible", command=self.toggle_visibility, bg="#4a4a4a", fg="white", relief=tk.FLAT, font=("Segoe UI", 8))
+        self.vis_btn.pack(side=tk.LEFT, padx=2)
+
+        op_row = tk.Frame(layers_frame, bg="#2b2b2b")
+        op_row.pack(fill=tk.X, pady=4)
+        tk.Label(op_row, text="Opacity:", bg="#2b2b2b", fg="#cccccc", font=("Segoe UI", 8)).pack(side=tk.LEFT)
+        self.opacity_var = tk.DoubleVar(value=100)
+        self.opacity_scale = tk.Scale(op_row, from_=0, to=100, orient=tk.HORIZONTAL, variable=self.opacity_var, bg="#2b2b2b", fg="#cccccc", highlightthickness=0, troughcolor="#444444", length=150, command=self.on_opacity_change)
+        self.opacity_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        btn_row = tk.Frame(layers_frame, bg="#2b2b2b")
+        btn_row.pack(fill=tk.X, pady=4)
+        tk.Button(btn_row, text="New", command=self.add_layer, bg="#3c3c3c", fg="white", relief=tk.FLAT, width=6).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_row, text="Dup", command=self.duplicate_layer, bg="#3c3c3c", fg="white", relief=tk.FLAT, width=6).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_row, text="Del", command=self.delete_layer, bg="#5a2a2a", fg="white", relief=tk.FLAT, width=6).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_row, text="Merge", command=self.merge_down, bg="#3c3c3c", fg="white", relief=tk.FLAT, width=8).pack(side=tk.LEFT, padx=2)
+
+        adj_frame = tk.LabelFrame(self.right_panel, text="Adjustments (Active Layer)", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=6)
+        adj_frame.pack(fill=tk.X, padx=8, pady=4)
         self.sliders = {}
         for name, label in [("brightness", "Brightness"), ("contrast", "Contrast"), ("saturation", "Saturation"), ("sharpness", "Sharpness")]:
             row = tk.Frame(adj_frame, bg="#2b2b2b")
-            row.pack(fill=tk.X, pady=4)
-            tk.Label(row, text=label, bg="#2b2b2b", fg="#cccccc", width=12, anchor="w", font=("Segoe UI", 9)).pack(side=tk.LEFT)
-            scale = tk.Scale(row, from_=0.0, to=2.0, resolution=0.05, orient=tk.HORIZONTAL, bg="#2b2b2b", fg="#cccccc",
-                             highlightthickness=0, troughcolor="#444444", length=150, command=lambda v, n=name: self.on_adjust_live(n))
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(row, text=label, bg="#2b2b2b", fg="#cccccc", width=12, anchor="w", font=("Segoe UI", 8)).pack(side=tk.LEFT)
+            scale = tk.Scale(row, from_=0.0, to=2.0, resolution=0.05, orient=tk.HORIZONTAL, bg="#2b2b2b", fg="#cccccc", highlightthickness=0, troughcolor="#444444", length=140)
             scale.set(1.0)
             scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
             self.sliders[name] = scale
+        btn_row2 = tk.Frame(adj_frame, bg="#2b2b2b")
+        btn_row2.pack(fill=tk.X, pady=(6,0))
+        tk.Button(btn_row2, text="Apply to Layer", command=self.apply_adjustments, bg="#0e639c", fg="white", relief=tk.FLAT, padx=8, font=("Segoe UI", 8)).pack(side=tk.LEFT)
+        tk.Button(btn_row2, text="Reset Sliders", command=self.reset_sliders, bg="#3c3c3c", fg="white", relief=tk.FLAT, padx=8, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=4)
 
-        btn_row = tk.Frame(adj_frame, bg="#2b2b2b")
-        btn_row.pack(fill=tk.X, pady=(10,0))
-        tk.Button(btn_row, text="Apply Adjustments", command=self.apply_adjustments, bg="#0e639c", fg="white", relief=tk.FLAT, padx=10).pack(side=tk.LEFT)
-        tk.Button(btn_row, text="Reset", command=self.reset_sliders, bg="#3c3c3c", fg="white", relief=tk.FLAT, padx=10).pack(side=tk.LEFT, padx=5)
-
-        # --- Resize Panel ---
-        resize_frame = tk.LabelFrame(self.right_panel, text="Resize & Save", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=10)
-        resize_frame.pack(fill=tk.X, padx=8, pady=8)
-
-        # current size info
+        resize_frame = tk.LabelFrame(self.right_panel, text="Resize & Save (Composite)", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=6)
+        resize_frame.pack(fill=tk.X, padx=8, pady=4)
         self.size_info_var = tk.StringVar(value="No image")
         tk.Label(resize_frame, textvariable=self.size_info_var, bg="#2b2b2b", fg="#888888", font=("Segoe UI", 8)).pack(anchor="w")
-
         row_w = tk.Frame(resize_frame, bg="#2b2b2b")
-        row_w.pack(fill=tk.X, pady=4)
-        tk.Label(row_w, text="Width:", bg="#2b2b2b", fg="#cccccc", width=8, anchor="w").pack(side=tk.LEFT)
-        self.width_entry = tk.Entry(row_w, width=10, bg="#3c3c3c", fg="white", insertbackground="white")
+        row_w.pack(fill=tk.X, pady=2)
+        tk.Label(row_w, text="Width:", bg="#2b2b2b", fg="#cccccc", width=8, anchor="w", font=("Segoe UI", 8)).pack(side=tk.LEFT)
+        self.width_entry = tk.Entry(row_w, width=10, bg="#3c3c3c", fg="white", insertbackground="white", font=("Segoe UI", 8))
         self.width_entry.pack(side=tk.LEFT)
-
         row_h = tk.Frame(resize_frame, bg="#2b2b2b")
-        row_h.pack(fill=tk.X, pady=4)
-        tk.Label(row_h, text="Height:", bg="#2b2b2b", fg="#cccccc", width=8, anchor="w").pack(side=tk.LEFT)
-        self.height_entry = tk.Entry(row_h, width=10, bg="#3c3c3c", fg="white", insertbackground="white")
+        row_h.pack(fill=tk.X, pady=2)
+        tk.Label(row_h, text="Height:", bg="#2b2b2b", fg="#cccccc", width=8, anchor="w", font=("Segoe UI", 8)).pack(side=tk.LEFT)
+        self.height_entry = tk.Entry(row_h, width=10, bg="#3c3c3c", fg="white", insertbackground="white", font=("Segoe UI", 8))
         self.height_entry.pack(side=tk.LEFT)
+        tk.Checkbutton(resize_frame, text="Lock aspect ratio", variable=self.lock_aspect, bg="#2b2b2b", fg="#cccccc", selectcolor="#3c3c3c", activebackground="#2b2b2b", font=("Segoe UI", 8)).pack(anchor="w", pady=2)
+        tk.Button(resize_frame, text="Apply Resize to All Layers", command=self.apply_resize, bg="#0e639c", fg="white", relief=tk.FLAT, padx=10, pady=2, font=("Segoe UI", 8)).pack(fill=tk.X, pady=(6,2))
+        tk.Button(resize_frame, text="Save As New File (Never Overwrites)", command=self.save_as, bg="#16825d", fg="white", relief=tk.FLAT, padx=10, pady=5, font=("Segoe UI", 8, "bold")).pack(fill=tk.X, pady=2)
 
-        tk.Checkbutton(resize_frame, text="Lock aspect ratio", variable=self.lock_aspect, bg="#2b2b2b", fg="#cccccc", selectcolor="#3c3c3c", activebackground="#2b2b2b").pack(anchor="w", pady=4)
-
-        tk.Button(resize_frame, text="Apply Resize", command=self.apply_resize, bg="#0e639c", fg="white", relief=tk.FLAT, padx=10, pady=2).pack(fill=tk.X, pady=(8,4))
-        tk.Button(resize_frame, text="Save As New File (Never Overwrites)", command=self.save_as, bg="#16825d", fg="white", relief=tk.FLAT, padx=10, pady=6).pack(fill=tk.X, pady=4)
-
-        # Info
-        info = tk.LabelFrame(self.right_panel, text="How to Use", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=10)
-        info.pack(fill=tk.BOTH, padx=8, pady=8, expand=True)
-        tk.Label(info, text="1. Open image\n2. Crop Mode > drag on image > Apply Crop\n3. Use Rotate / Flip buttons\n4. Adjust sliders > Apply Adjustments\n5. Set Width/Height > Apply Resize\n6. Save As to new file\n\nUndo: Ctrl+Z  Redo: Ctrl+Y", justify=tk.LEFT, bg="#2b2b2b", fg="#888888", font=("Segoe UI", 8)).pack(anchor="w")
+        hist_frame = tk.LabelFrame(self.right_panel, text="History", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
+        hist_frame.pack(fill=tk.BOTH, padx=8, pady=4, expand=True)
+        self.history_listbox = tk.Listbox(hist_frame, bg="#252525", fg="#aaaaaa", height=6, font=("Segoe UI", 8))
+        self.history_listbox.pack(fill=tk.BOTH, expand=True)
+        self.history_listbox.insert(tk.END, "History: Open image to start")
 
     def make_tool_button(self, text, cmd):
-        b = tk.Button(self.toolbar, text=text, command=cmd, bg="#4a4a4a", fg="white", relief=tk.FLAT, font=("Segoe UI", 9), padx=5, pady=6, width=14, wraplength=70)
+        b = tk.Button(self.toolbar, text=text, command=cmd, bg="#4a4a4a", fg="white", relief=tk.FLAT, font=("Segoe UI", 9), padx=5, pady=5, width=14, wraplength=70)
         b.pack(pady=2, padx=5)
 
     def bind_shortcuts(self):
         self.root.bind("<Control-o>", lambda e: self.open_image())
-        self.root.bind("<Control-O>", lambda e: self.open_image())
         self.root.bind("<Control-s>", lambda e: self.save_as())
+        self.root.bind("<Control-l>", lambda e: self.add_layer())
+        self.root.bind("<Control-e>", lambda e: self.merge_down())
         self.root.bind("<Control-z>", lambda e: self.undo())
         self.root.bind("<Control-y>", lambda e: self.redo())
-        self.root.bind("<Control-Y>", lambda e: self.redo())
+        self.root.bind("<Delete>", lambda e: self.delete_layer())
 
-    # ---------- Core Helpers ----------
-    def push_undo(self):
-        if self.current_image is None:
+    def composite_layers(self):
+        if not self.layers:
+            return None
+        base_w = max(l.image.width for l in self.layers)
+        base_h = max(l.image.height for l in self.layers)
+        composite = Image.new("RGBA", (base_w, base_h), (0,0,0,0))
+        for layer in self.layers:
+            if not layer.visible:
+                continue
+            l_img = layer.image
+            if l_img.mode != "RGBA":
+                l_img = l_img.convert("RGBA")
+            if layer.opacity < 1.0:
+                alpha = l_img.split()[3]
+                alpha = ImageEnhance.Brightness(alpha).enhance(layer.opacity)
+                l_img = l_img.copy()
+                l_img.putalpha(alpha)
+            if l_img.size != composite.size:
+                tmp = Image.new("RGBA", composite.size, (0,0,0,0))
+                x = (composite.width - l_img.width)//2
+                y = (composite.height - l_img.height)//2
+                tmp.paste(l_img, (x,y), l_img)
+                l_img = tmp
+            composite = Image.alpha_composite(composite, l_img)
+        return composite
+
+    def push_undo(self, action="Action"):
+        if not self.layers:
             return
         if len(self.undo_stack) >= self.max_undo:
             self.undo_stack.pop(0)
-        self.undo_stack.append(self.current_image.copy())
+        self.undo_stack.append(([l.copy() for l in self.layers], self.active_layer_idx, action))
         self.redo_stack.clear()
-        self.update_status(f"Undo stack: {len(self.undo_stack)} | Redo: {len(self.redo_stack)}")
+        self.history_listbox.insert(tk.END, action)
+        self.history_listbox.see(tk.END)
+        self.status_var.set(f"{action} | Undo:{len(self.undo_stack)} Redo:{len(self.redo_stack)}")
+
+    def refresh_layers_list(self):
+        self.layers_listbox.delete(0, tk.END)
+        for i in reversed(range(len(self.layers))):
+            l = self.layers[i]
+            vis = "O" if l.visible else "X"
+            active = ">" if i == self.active_layer_idx else " "
+            self.layers_listbox.insert(tk.END, f"{active} [{vis}] {l.name} {int(l.opacity*100)}%")
+        if self.layers:
+            rev_idx = len(self.layers)-1 - self.active_layer_idx
+            self.layers_listbox.selection_clear(0, tk.END)
+            self.layers_listbox.selection_set(rev_idx)
+        if self.layers:
+            self.opacity_var.set(self.layers[self.active_layer_idx].opacity*100)
+
+    def on_layer_select(self, event):
+        if not self.layers:
+            return
+        sel = self.layers_listbox.curselection()
+        if not sel:
+            return
+        rev_idx = sel[0]
+        real_idx = len(self.layers)-1 - rev_idx
+        self.active_layer_idx = real_idx
+        self.refresh_layers_list()
+        self.display_composite()
+        self.status_var.set(f"Active: {self.layers[real_idx].name}")
 
     def open_image(self):
         path = filedialog.askopenfilename(filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif *.tiff *.webp"), ("All", "*.*")])
         if not path:
             return
         try:
-            img = Image.open(path)
-            img.load()
-            # Convert to RGBA for consistent editing, but keep original for save logic
-            if img.mode not in ("RGB", "RGBA"):
-                img = img.convert("RGBA")
+            img = Image.open(path).convert("RGBA")
             self.original_path = path
-            self.original_image = img.copy()
-            self.current_image = img.copy()
+            self.layers = [Layer("Background", img.copy(), True, 1.0)]
+            self.active_layer_idx = 0
             self.undo_stack.clear()
             self.redo_stack.clear()
+            self.history_listbox.delete(0, tk.END)
+            self.history_listbox.insert(tk.END, f"Opened {os.path.basename(path)}")
             self.reset_sliders()
-            self.display_image_on_canvas()
+            self.refresh_layers_list()
+            self.display_composite()
             self.update_resize_entries()
-            self.status_var.set(f"Opened: {os.path.basename(path)} | {img.width}x{img.height}")
         except Exception as e:
             messagebox.showerror("Open Error", str(e))
 
-    def display_image_on_canvas(self):
-        if self.current_image is None:
+    def display_composite(self):
+        self.composited_image = self.composite_layers()
+        if self.composited_image is None:
             return
         self.canvas.delete("all")
         self.crop_rect_id = None
         self.crop_coords = None
-
-        # Fit to canvas
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
         if cw < 50:
-            cw = 800
+            cw = 900
             ch = 600
-
-        img_w, img_h = self.current_image.size
-        scale = min(cw / img_w, ch / img_h, 1.0) * 0.95
+        img_w, img_h = self.composited_image.size
+        scale = min(cw / img_w, ch / img_h, 1.0) * 0.92
         self.zoom = scale
         dw = int(img_w * scale)
         dh = int(img_h * scale)
         self.display_size = (dw, dh)
-
-        display_img = self.current_image.resize((dw, dh), Image.LANCZOS)
+        display_img = self.composited_image.resize((dw, dh), Image.LANCZOS)
         self.photo = ImageTk.PhotoImage(display_img)
-
         x0 = (cw - dw) // 2
         y0 = (ch - dh) // 2
         self.image_offset = (x0, y0)
         self.canvas.create_image(x0, y0, anchor="nw", image=self.photo)
-        self.size_info_var.set(f"{self.current_image.width} x {self.current_image.height} px (display {dw}x{dh})")
+        self.size_info_var.set(f"{self.composited_image.width}x{self.composited_image.height}px | {len(self.layers)} layers | Active: {self.layers[self.active_layer_idx].name if self.layers else 'None'}")
 
     def update_resize_entries(self):
-        if self.current_image:
+        if self.composited_image:
             self.width_entry.delete(0, tk.END)
-            self.width_entry.insert(0, str(self.current_image.width))
+            self.width_entry.insert(0, str(self.composited_image.width))
             self.height_entry.delete(0, tk.END)
-            self.height_entry.insert(0, str(self.current_image.height))
+            self.height_entry.insert(0, str(self.composited_image.height))
 
     def canvas_to_image_coords(self, cx, cy):
         ox, oy = self.image_offset
         dw, dh = self.display_size
-        if dw == 0 or dh == 0:
+        if dw == 0 or dh == 0 or self.composited_image is None:
             return None
-        # clamp to image
         ix = (cx - ox) / self.zoom
         iy = (cy - oy) / self.zoom
         return (ix, iy)
 
-    # ---------- Crop ----------
+    def add_layer(self):
+        if not self.layers:
+            messagebox.showinfo("Layers", "Open an image first.")
+            return
+        self.push_undo("Add Layer")
+        w, h = self.composited_image.size
+        transparent = Image.new("RGBA", (w, h), (0,0,0,0))
+        name = f"Layer {len(self.layers)}"
+        self.layers.append(Layer(name, transparent, True, 1.0))
+        self.active_layer_idx = len(self.layers)-1
+        self.refresh_layers_list()
+        self.display_composite()
+
+    def duplicate_layer(self):
+        if not self.layers:
+            return
+        self.push_undo(f"Duplicate {self.layers[self.active_layer_idx].name}")
+        src = self.layers[self.active_layer_idx]
+        dup = Layer(f"{src.name} copy", src.image.copy(), src.visible, src.opacity)
+        self.layers.insert(self.active_layer_idx+1, dup)
+        self.active_layer_idx += 1
+        self.refresh_layers_list()
+        self.display_composite()
+
+    def delete_layer(self):
+        if not self.layers:
+            return
+        if len(self.layers) == 1:
+            messagebox.showinfo("Layers", "Cannot delete last layer. Use Reset.")
+            return
+        if not messagebox.askyesno("Delete Layer", f"Delete {self.layers[self.active_layer_idx].name}?"):
+            return
+        self.push_undo(f"Delete {self.layers[self.active_layer_idx].name}")
+        del self.layers[self.active_layer_idx]
+        self.active_layer_idx = max(0, min(self.active_layer_idx, len(self.layers)-1))
+        self.refresh_layers_list()
+        self.display_composite()
+
+    def toggle_visibility(self):
+        if not self.layers:
+            return
+        self.layers[self.active_layer_idx].visible = not self.layers[self.active_layer_idx].visible
+        self.refresh_layers_list()
+        self.display_composite()
+
+    def on_opacity_change(self, val):
+        if not self.layers:
+            return
+        try:
+            op = float(val)/100.0
+            self.layers[self.active_layer_idx].opacity = op
+            self.display_composite()
+            self.refresh_layers_list()
+        except:
+            pass
+
+    def merge_down(self):
+        if not self.layers or len(self.layers) < 2 or self.active_layer_idx == 0:
+            messagebox.showinfo("Merge Down", "Select a layer above Background to merge down.")
+            return
+        self.push_undo(f"Merge {self.layers[self.active_layer_idx].name} down")
+        top_idx = self.active_layer_idx
+        bottom_idx = top_idx - 1
+        bottom = self.layers[bottom_idx]
+        top = self.layers[top_idx]
+        base = bottom.image.copy().convert("RGBA")
+        top_img = top.image.convert("RGBA") if top.image.mode!="RGBA" else top.image
+        if top.opacity < 1.0:
+            tmp = top_img.copy()
+            alpha = tmp.split()[3]
+            alpha = ImageEnhance.Brightness(alpha).enhance(top.opacity)
+            tmp.putalpha(alpha)
+            top_img = tmp
+        if top_img.size != base.size:
+            tmp = Image.new("RGBA", base.size, (0,0,0,0))
+            x = (base.width - top_img.width)//2
+            y = (base.height - top_img.height)//2
+            tmp.paste(top_img, (x,y), top_img)
+            top_img = tmp
+        merged = Image.alpha_composite(base, top_img)
+        bottom.image = merged
+        del self.layers[top_idx]
+        self.active_layer_idx = bottom_idx
+        self.refresh_layers_list()
+        self.display_composite()
+
+    def flatten_image(self):
+        if not self.layers:
+            return
+        if not messagebox.askyesno("Flatten", "Flatten all layers?"):
+            return
+        self.push_undo("Flatten Image")
+        comp = self.composite_layers()
+        self.layers = [Layer("Background", comp, True, 1.0)]
+        self.active_layer_idx = 0
+        self.refresh_layers_list()
+        self.display_composite()
+
     def toggle_crop_mode(self):
-        if self.current_image is None:
+        if not self.layers:
             messagebox.showinfo("Crop", "Open an image first.")
             return
         self.crop_mode = not self.crop_mode
         if self.crop_mode:
-            self.status_var.set("CROP MODE: Drag on image to select area, then click Apply Crop")
+            self.status_var.set("CROP MODE: Drag > Apply Crop (ALL layers)")
             self.canvas.config(cursor="crosshair")
         else:
-            self.status_var.set("Crop mode OFF")
+            self.status_var.set("Crop OFF")
             self.canvas.config(cursor="cross")
             if self.crop_rect_id:
                 self.canvas.delete(self.crop_rect_id)
                 self.crop_rect_id = None
 
     def on_crop_press(self, event):
-        if not self.crop_mode or self.current_image is None:
+        if not self.crop_mode or not self.layers:
             return
         self.crop_start = (event.x, event.y)
         if self.crop_rect_id:
@@ -277,63 +449,63 @@ class ImageEditor:
             return
         x0, y0 = self.crop_start
         x1, y1 = event.x, event.y
-        # normalize
         self.crop_coords = (min(x0,x1), min(y0,y1), max(x0,x1), max(y0,y1))
 
     def apply_crop(self):
-        if self.current_image is None or self.crop_coords is None:
-            messagebox.showinfo("Crop", "Enter crop mode and drag a rectangle first.")
+        if not self.layers or self.crop_coords is None:
+            messagebox.showinfo("Crop", "Drag a rectangle first.")
             return
         try:
             x0, y0, x1, y1 = self.crop_coords
-            # Convert canvas coords to image coords
             p0 = self.canvas_to_image_coords(x0, y0)
             p1 = self.canvas_to_image_coords(x1, y1)
             if p0 is None or p1 is None:
                 return
             ix0, iy0 = p0
             ix1, iy1 = p1
-            # clamp
-            ix0 = max(0, min(self.current_image.width, ix0))
-            ix1 = max(0, min(self.current_image.width, ix1))
-            iy0 = max(0, min(self.current_image.height, iy0))
-            iy1 = max(0, min(self.current_image.height, iy1))
+            comp_w, comp_h = self.composited_image.size
+            ix0 = max(0, min(comp_w, ix0))
+            ix1 = max(0, min(comp_w, ix1))
+            iy0 = max(0, min(comp_h, iy0))
+            iy1 = max(0, min(comp_h, iy1))
             left, right = sorted([int(ix0), int(ix1)])
             top, bottom = sorted([int(iy0), int(iy1)])
             if right - left < 5 or bottom - top < 5:
-                messagebox.showinfo("Crop", "Selection too small.")
+                messagebox.showinfo("Crop", "Too small.")
                 return
-            self.push_undo()
-            self.current_image = self.current_image.crop((left, top, right, bottom))
+            self.push_undo(f"Crop to {right-left}x{bottom-top}")
+            for layer in self.layers:
+                if layer.image.size == self.composited_image.size:
+                    layer.image = layer.image.crop((left, top, right, bottom))
+                else:
+                    layer.image = layer.image.crop((left, top, right, bottom))
             self.crop_mode = False
             self.canvas.config(cursor="cross")
             if self.crop_rect_id:
                 self.canvas.delete(self.crop_rect_id)
             self.crop_coords = None
-            self.display_image_on_canvas()
+            self.display_composite()
             self.update_resize_entries()
-            self.status_var.set(f"Cropped to {self.current_image.width}x{self.current_image.height}")
         except Exception as e:
             messagebox.showerror("Crop Error", str(e))
 
-    # ---------- Rotate / Flip ----------
     def rotate_image(self, angle):
-        if self.current_image is None:
+        if not self.layers:
             return
-        self.push_undo()
-        # PIL rotates counter-clockwise, expand to keep whole image
-        self.current_image = self.current_image.rotate(angle, expand=True, resample=Image.BICUBIC)
-        self.display_image_on_canvas()
+        self.push_undo(f"Rotate {angle} {self.layers[self.active_layer_idx].name}")
+        layer = self.layers[self.active_layer_idx]
+        layer.image = layer.image.rotate(angle, expand=True, resample=Image.BICUBIC)
+        self.display_composite()
         self.update_resize_entries()
 
     def rotate_custom_dialog(self):
-        if self.current_image is None:
+        if not self.layers:
             return
         dialog = tk.Toplevel(self.root)
         dialog.title("Custom Rotate")
         dialog.geometry("300x120")
         dialog.transient(self.root)
-        tk.Label(dialog, text="Angle (degrees, -360 to 360):").pack(pady=10)
+        tk.Label(dialog, text="Angle:").pack(pady=10)
         entry = tk.Entry(dialog)
         entry.pack()
         entry.insert(0, "0")
@@ -342,41 +514,35 @@ class ImageEditor:
             try:
                 ang = float(entry.get())
                 dialog.destroy()
-                self.push_undo()
-                self.current_image = self.current_image.rotate(ang, expand=True, resample=Image.BICUBIC)
-                self.display_image_on_canvas()
+                self.push_undo(f"Rotate {ang} {self.layers[self.active_layer_idx].name}")
+                self.layers[self.active_layer_idx].image = self.layers[self.active_layer_idx].image.rotate(ang, expand=True, resample=Image.BICUBIC)
+                self.display_composite()
                 self.update_resize_entries()
             except ValueError:
-                messagebox.showerror("Error", "Enter a valid number")
+                messagebox.showerror("Error", "Valid number")
         tk.Button(dialog, text="Rotate", command=do_rotate).pack(pady=10)
 
     def flip_image(self, direction):
-        if self.current_image is None:
+        if not self.layers:
             return
-        self.push_undo()
+        self.push_undo(f"Flip {direction} {self.layers[self.active_layer_idx].name}")
+        layer = self.layers[self.active_layer_idx]
         if direction == "h":
-            self.current_image = ImageOps.mirror(self.current_image)
+            layer.image = ImageOps.mirror(layer.image)
         else:
-            self.current_image = ImageOps.flip(self.current_image)
-        self.display_image_on_canvas()
-
-    # ---------- Adjustments ----------
-    def on_adjust_live(self, name):
-        # Live preview disabled to keep undo clean; we just update status
-        # If you want live, uncomment below
-        pass
+            layer.image = ImageOps.flip(layer.image)
+        self.display_composite()
 
     def apply_adjustments(self):
-        if self.current_image is None:
+        if not self.layers:
             return
-        self.push_undo()
-        img = self.current_image
+        self.push_undo(f"Adjust {self.layers[self.active_layer_idx].name}")
+        img = self.layers[self.active_layer_idx].image
         try:
             b = self.sliders["brightness"].get()
             c = self.sliders["contrast"].get()
             s = self.sliders["saturation"].get()
             sh = self.sliders["sharpness"].get()
-
             if b != 1.0:
                 img = ImageEnhance.Brightness(img).enhance(b)
             if c != 1.0:
@@ -385,10 +551,8 @@ class ImageEditor:
                 img = ImageEnhance.Color(img).enhance(s)
             if sh != 1.0:
                 img = ImageEnhance.Sharpness(img).enhance(sh)
-
-            self.current_image = img
-            self.display_image_on_canvas()
-            self.status_var.set(f"Adjustments applied: B={b:.2f} C={c:.2f} S={s:.2f} Sh={sh:.2f}")
+            self.layers[self.active_layer_idx].image = img
+            self.display_composite()
         except Exception as e:
             messagebox.showerror("Adjustment Error", str(e))
 
@@ -396,125 +560,94 @@ class ImageEditor:
         for scale in self.sliders.values():
             scale.set(1.0)
 
-    # ---------- Resize ----------
     def apply_resize(self):
-        if self.current_image is None:
+        if not self.layers or self.composited_image is None:
             return
         try:
-            w_text = self.width_entry.get().strip()
-            h_text = self.height_entry.get().strip()
-            if not w_text or not h_text:
-                return
-            new_w = int(w_text)
-            new_h = int(h_text)
-            if new_w <= 0 or new_h <= 0 or new_w > 10000 or new_h > 10000:
-                raise ValueError("Width/Height must be 1-10000")
-
+            new_w = int(self.width_entry.get().strip())
+            new_h = int(self.height_entry.get().strip())
             if self.lock_aspect.get():
-                # Use width as driver if it changed, else height
-                orig_w, orig_h = self.current_image.size
-                # Decide which entry the user edited last - simple heuristic: if aspect doesn't match, preserve
-                # For now, just enforce aspect from width
-                # If user changed both, we trust them but warn
+                orig_w, orig_h = self.composited_image.size
                 aspect = orig_w / orig_h
-                # Check if entries are close to aspect
-                # We'll use width to calculate height if height is not proportional
                 if abs((new_w / new_h) - aspect) > 0.01:
-                    # Recalculate height from width
                     new_h = int(new_w / aspect)
                     self.height_entry.delete(0, tk.END)
                     self.height_entry.insert(0, str(new_h))
-
-            self.push_undo()
-            self.current_image = self.current_image.resize((new_w, new_h), Image.LANCZOS)
-            self.display_image_on_canvas()
+            self.push_undo(f"Resize to {new_w}x{new_h}")
+            for layer in self.layers:
+                layer.image = layer.image.resize((new_w, new_h), Image.LANCZOS)
+            self.display_composite()
             self.update_resize_entries()
-            self.status_var.set(f"Resized to {new_w}x{new_h}")
-        except ValueError as ve:
-            messagebox.showerror("Resize Error", str(ve))
         except Exception as e:
             messagebox.showerror("Resize Error", str(e))
 
-    # ---------- Undo/Redo/Reset ----------
     def undo(self):
         if not self.undo_stack:
-            self.status_var.set("Nothing to undo")
             return
-        self.redo_stack.append(self.current_image.copy())
-        self.current_image = self.undo_stack.pop()
-        self.display_image_on_canvas()
+        self.redo_stack.append(([l.copy() for l in self.layers], self.active_layer_idx, "Redo"))
+        layers_copy, active_idx, action = self.undo_stack.pop()
+        self.layers = layers_copy
+        self.active_layer_idx = min(active_idx, len(self.layers)-1)
+        self.refresh_layers_list()
+        self.display_composite()
         self.update_resize_entries()
-        self.status_var.set(f"Undo. Undo:{len(self.undo_stack)} Redo:{len(self.redo_stack)}")
 
     def redo(self):
         if not self.redo_stack:
-            self.status_var.set("Nothing to redo")
             return
-        self.undo_stack.append(self.current_image.copy())
-        self.current_image = self.redo_stack.pop()
-        self.display_image_on_canvas()
+        self.undo_stack.append(([l.copy() for l in self.layers], self.active_layer_idx, "Undo"))
+        layers_copy, active_idx, action = self.redo_stack.pop()
+        self.layers = layers_copy
+        self.active_layer_idx = min(active_idx, len(self.layers)-1)
+        self.refresh_layers_list()
+        self.display_composite()
         self.update_resize_entries()
-        self.status_var.set(f"Redo. Undo:{len(self.undo_stack)} Redo:{len(self.redo_stack)}")
 
     def reset_image(self):
-        if self.original_image is None:
+        if not self.layers or not self.original_path:
             return
-        self.push_undo()
-        self.current_image = self.original_image.copy()
-        self.reset_sliders()
-        self.display_image_on_canvas()
-        self.update_resize_entries()
-        self.status_var.set("Reset to original")
+        if not messagebox.askyesno("Reset", "Reset to original Background? Remove extra layers?"):
+            return
+        try:
+            img = Image.open(self.original_path).convert("RGBA")
+            self.push_undo("Reset to original")
+            self.layers = [Layer("Background", img, True, 1.0)]
+            self.active_layer_idx = 0
+            self.refresh_layers_list()
+            self.display_composite()
+            self.update_resize_entries()
+        except Exception as e:
+            messagebox.showerror("Reset Error", str(e))
 
-    # ---------- Save ----------
     def save_as(self):
-        if self.current_image is None:
-            messagebox.showinfo("Save", "No image to save.")
+        if self.composited_image is None:
+            messagebox.showinfo("Save", "No image")
             return
-        # Never overwrite original - default to new name
         initial = "edited_image.png"
         if self.original_path:
             base, ext = os.path.splitext(os.path.basename(self.original_path))
             initial = f"{base}_edited{ext or '.png'}"
-
-        path = filedialog.asksaveasfilename(
-            initialfile=initial,
-            defaultextension=".png",
-            filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg *.jpeg"), ("All", "*.*")],
-            title="Save As - Original will NOT be overwritten"
-        )
+        path = filedialog.asksaveasfilename(initialfile=initial, defaultextension=".png", filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg"), ("All", "*.*")])
         if not path:
             return
-        # Safety: prevent overwriting original
-        if self.original_path and os.path.abspath(path) == os.path.abspath(self.original_path):
-            if not messagebox.askyesno("Warning", "You are about to overwrite the original! Milestone 2 rule says never overwrite. Save anyway?"):
-                return
         try:
-            # Handle RGBA -> JPEG
-            save_img = self.current_image
+            save_img = self.composited_image
             if path.lower().endswith((".jpg", ".jpeg")) and save_img.mode == "RGBA":
-                save_img = save_img.convert("RGB")
+                bg = Image.new("RGB", save_img.size, (255,255,255))
+                bg.paste(save_img, mask=save_img.split()[3])
+                save_img = bg
             save_img.save(path)
-            self.status_var.set(f"Saved as: {os.path.basename(path)} ({save_img.width}x{save_img.height})")
-            messagebox.showinfo("Saved", f"Saved to:\n{path}\nOriginal untouched.")
+            self.status_var.set(f"Saved: {os.path.basename(path)} | {len(self.layers)} layers flattened")
+            messagebox.showinfo("Saved", f"Saved composite to:\n{path}")
         except Exception as e:
             messagebox.showerror("Save Error", str(e))
 
-    def update_status(self, msg):
-        self.status_var.set(msg)
-
 if __name__ == "__main__":
     root = tk.Tk()
-    # Optional: nicer theme
     try:
         style = ttk.Style()
         style.theme_use("clam")
     except:
         pass
     app = ImageEditor(root)
-    # Resize canvas on window resize
-    def on_resize(event):
-        if app.current_image:
-            app.display_image_on_canvas()
-    root.bind("<Configure>", lambda e: root.after(100, lambda: app.display_image_on_canvas() if e.widget == root else None))
     root.mainloop()
