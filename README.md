@@ -1,141 +1,166 @@
-# ImageEditor - Photoshop-Style AI Image Editor
+# ImageEditor - Milestone 9 TIER 5.1 (Modular AI + ComfyUI + A1111)
 
-**Version:** v1.0-ai-editor  
-**Repo:** https://github.com/tclark0914-star/ImageEditor  
-**Author:** Toby Clark  
-**Built:** 100% in Python + Tkinter + Pillow + rembg
+A Photoshop-like image editor built with Python Tkinter - now with modular AI prompt generation!
 
-A lightweight Photoshop-style image editor built from scratch in 4 milestones. No monthly subscription, all local, never overwrites originals.
+## 🚀 Features - 3038 Lines, ~80% of Photoshop
 
-## Features
+### Core Editing (Tier 1-3)
+- **Layers + Masks**: Full layer system with blend modes, opacity, masks
+- **Tools**: Select, Crop, Brush, Eraser, Text, Clone Stamp, Lasso, Wand
+- **Adjustments**: Levels, Curves, Hue/Saturation, Shadows/Highlights, Vignette
+- **Filters**: Blur, Sharpen, Grayscale, Sepia, Invert, Edge Enhance, etc.
+- **AI**: Remove Background (rembg), Upscale, Auto Enhance, Denoise
 
-### Milestone 1 - Core Viewer
-- Open any image (PNG, JPG, BMP, GIF, TIFF, WebP)
-- Centered canvas with zoom-to-fit
-- Status bar
+### NEW in Tier 5.1 - Modular AI Prompt System ✨
+- **Modular AI Provider System**: Add new AI generators without editing main.py!
+- **No Watermark**: Clean images from all providers
+- **9 Built-in Providers**:
+  - 🌐 **Pollinations (FREE)** - No key, no install, no watermark, unlimited
+  - 🤗 **HuggingFace Inference (FREE)** - Optional token for higher limits
+  - 🎨 **OpenAI DALL-E 3** - Best quality ($)
+  - 🖥️ **Automatic1111 WebUI (LOCAL)** - Your GPU, fast, private - BEST FOR LOCAL!
+  - 🧩 **ComfyUI (LOCAL)** - Advanced workflows, local GPU
+  - 💎 **Stability AI SDXL** - Stability.ai API
+  - 🔁 **Replicate** - 100+ models
+  - 💻 **Local Diffusers** - `pip install diffusers`
+  - 🎭 **Procedural Demo** - Offline fallback, now NO watermark!
 
-### Milestone 2 - Photoshop UI
-- Left toolbar (Tools panel) - dark theme
-- Right panels: Adjustments + Resize & Save
-- Crop Mode: Drag rectangle on canvas, Apply Crop
-- Rotate: 90° Left/Right + custom angle
-- Flip Horizontal / Vertical
-- Resize with Lock Aspect Ratio
-- Adjustments: Brightness, Contrast, Saturation, Sharpness (live sliders)
-- Undo/Redo (Ctrl+Z / Ctrl+Y)
-- Save As New File - **never overwrites original**
+### AI Features
+- **Generate Image from Prompt (Ctrl+G)**: Text -> New Layer
+- **AI Fill Selection**: Select area -> Generate inside it
+- **AI Replace Background**: Generate new background, keep foreground
+- **Plugin System**: Drop .py files in `ai_generators/` folder to add new AIs!
 
-### Milestone 3 - Layers (like Photoshop)
-- Layers panel with active marker `>`
-- New Layer (transparent), Duplicate, Delete, Merge Down, Flatten
-- Opacity slider 0-100% live
-- Visibility toggle (O/X)
-- All tools work on Active Layer
-- Crop/Resize apply to all layers to keep alignment
-- History panel - visual undo stack
-- Composite display with transparency checker handled
-
-### Milestone 4 - AI Assisted
-- **Remove Background (AI)** - Uses `rembg` U2Net model. If not installed, falls back to white removal. Shortcut Ctrl+B
-- **Upscale 2x** - LANCZOS high-quality 2x (all layers)
-- **Auto Enhance** - Autocontrast + auto color + brightness normalization
-- **Denoise** - Median filter
-- **Smart Sharpen** - UnsharpMask
-
-## Install
+## 📦 Installation
 
 ```powershell
-cd $HOME\Documents\ImageEditor
-pip install pillow rembg onnxruntime
+cd "$HOME\Documents\ImageEditor"
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 python main.py
 ```
 
-First time you click Remove Background, it downloads ~170MB model to `C:\Users\YOU\.u2net` - takes 10-15s then instant.
+### For Local AI (Recommended)
 
-## How to Run Without PowerShell Every Time
-
-### Option 1 - Desktop Shortcut (30 seconds, recommended)
-
-1. Right-click Desktop > New > Shortcut
-2. Paste this as location:
+**Option A - Automatic1111 (Easiest, Best Quality Local):**
+```powershell
+# Download from https://github.com/AUTOMATIC1111/stable-diffusion-webui
+# Run:
+webui.bat --api --listen
+# Then in ImageEditor: AI Engine -> Automatic1111 WebUI
 ```
-C:\Users\tc06h\AppData\Local\Programs\Python\Python312\pythonw.exe C:\Users\tc06h\Documents\ImageEditor\main.py
+
+**Option B - ComfyUI (Advanced):**
+```powershell
+# Download from https://github.com/comfyanonymous/ComfyUI
+# Download model v1-5-pruned-emaonly.ckpt to models/checkpoints/
+# Run:
+python main.py --listen
+# Then in ImageEditor: AI Engine -> ComfyUI
 ```
-(adjust Python path if yours is different - check `where python` in PowerShell)
 
-3. Name: `ImageEditor`
-4. Right-click the new shortcut > Properties > Change Icon > pick something
+**Option C - No Install (FREE Online):**
+- Just use Pollinations - works out of the box, no setup!
 
-Double-click to launch!
+## 🔌 Adding New AI Generators
 
-**Or use the included batch file:**
+### Method 1: No Code - Custom API URL
+1. AI Menu -> Manage AI Providers -> Add Custom API Provider
+2. Name: `My Generator`
+3. URL: `https://api.example.com/generate?prompt={prompt}&width={width}&height={height}`
+4. Placeholders: `{prompt}`, `{width}`, `{height}`, `{style}`
+5. Click Add -> Auto-saved!
 
-Double-click `ImageEditor.bat` - we created it for you.
+### Method 2: Python Plugin (More Control)
+1. AI Menu -> Open ai_generators Folder
+2. Create `my_generator.py`:
+```python
+def register(editor):
+    def my_gen(prompt, width, height, style, status_var=None):
+        import requests
+        from PIL import Image
+        from io import BytesIO
+        resp = requests.get(f"https://api.example.com?prompt={prompt}")
+        return Image.open(BytesIO(resp.content)).convert("RGBA")
+    
+    editor.register_ai_provider("my_ai", {
+        "name": "My Custom AI",
+        "description": "My awesome generator",
+        "func": my_gen,
+        "enabled": True,
+        "free": True
+    })
+```
+3. Restart app - appears in provider list!
 
-### Option 2 - Make a Real .EXE (5 minutes)
-
-This builds a single `ImageEditor.exe` you can share:
+## 🎮 Usage
 
 ```powershell
-cd $HOME\Documents\ImageEditor
-pip install pyinstaller
-pyinstaller --onefile --windowed --name ImageEditor --clean main.py
+python main.py
+# - File -> Open Image
+# - Tools on left
+# - Right panels for settings
+# - AI -> Generate Image from Prompt (Ctrl+G)
+# - Try: "Nigerian soccer player celebrating goal vs Ghana, National Stadium Abuja, stylized"
+# - Engine: FREE Online AI or Automatic1111 if running locally
+# - Click GENERATE AS NEW LAYER
 ```
 
-EXE will be in `dist\ImageEditor.exe`
+## 📁 Project Structure
 
-**Warning:** With rembg included, EXE is ~300-600MB because it bundles numpy, scipy, onnxruntime, scikit-image. Without rembg, ~30MB.
-
-For smaller EXE, build from Milestone 2 version (no AI):
-```powershell
-pyinstaller --onefile --windowed --name ImageEditorLite main.py
+```
+ImageEditor/
+  main.py (3038 lines - Tier 5.1)
+  requirements.txt
+  README.md
+  .gitignore
+  ai_generators/ (auto-created)
+    _example_plugin.py
+    _a1111_howto.txt
+    _comfyui_howto.txt
+  AI_PROVIDERS_GUIDE.txt
+  tests/
+    test_tier4.py
+    test_ai_prompt.py
 ```
 
-### Option 3 - Auto-Start with Windows
-
-1. Press `Win+R` > type `shell:startup` > Enter
-2. Copy your desktop shortcut into that Startup folder
-
-## Shortcuts
-
-- Ctrl+O - Open
-- Ctrl+S - Save As
-- Ctrl+L - New Layer
-- Ctrl+B - Remove Background (AI)
-- Ctrl+E - Merge Down
-- Ctrl+Z - Undo
-- Ctrl+Y - Redo
-- Del - Delete Layer
-
-## Git Workflow (what you learned)
+## 🧪 Tests
 
 ```powershell
-cd $HOME\Documents\ImageEditor
-python main.py          # test
-git add main.py
-git commit -m "Describe change"
-git push
-git tag v1.0-name
-git push origin v1.0-name
+python test_tier4.py
+# ALL TIER 4 TESTS PASSED!
+
+python test_ai_prompt.py
+# ALL AI PROMPT TESTS PASSED!
 ```
 
-Always `cd` to `ImageEditor` first - PowerShell starts in `C:\WINDOWS\system32` where git won't work.
+## 📝 Milestones
 
-## Project Status
+- Milestone 8 Tier 4: 1866 lines - Gradient + Shadows/Highlights + Vignette
+- Milestone 9 Tier 5: 2837 lines - Modular AI + No Watermark
+- Milestone 9 Tier 5.1: 3038 lines - ComfyUI + Automatic1111 + Plugin System
 
-All 4 milestones complete and pushed to `main` branch:
-- b45cb9a Milestone 1
-- 1cae92c Milestone 2
-- 65627d5 Milestone 3 (Layers)
-- cf1d04a Milestone 4 (AI) - v1.0-ai-editor tag
+## 🔧 Config File
 
-## Future Ideas
+`~/.imageeditor_ai.json` stores:
+```json
+{
+  "openai_key": "sk-...",
+  "hf_token": "hf_...",
+  "stability_key": "...",
+  "replicate_key": "...",
+  "a1111_url": "http://127.0.0.1:7860",
+  "comfy_url": "http://127.0.0.1:8188",
+  "providers_enabled": {...},
+  "custom_providers": [...]
+}
+```
 
-- Text layers
-- Brush/draw on transparent layer
-- Real-ESRGAN upscaler (replace LANCZOS)
-- Drag & drop images onto canvas
-- Layer reordering via drag
+## 📄 License
 
----
-Built with ❤️ in PowerShell + Tkinter
+MIT - Free to use, modify, add AI providers!
+
+## 🙏 Credits
+
+Built with Pillow, Tkinter, rembg, diffusers, and love for Nigerian Super Eagles! 🇳🇬⚽

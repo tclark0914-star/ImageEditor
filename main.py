@@ -1,9 +1,12 @@
 ﻿
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, colorchooser
+from tkinter import ttk, filedialog, messagebox, colorchooser, simpledialog
 from PIL import Image, ImageTk, ImageEnhance, ImageOps, ImageFilter, ImageStat, ImageDraw, ImageChops, ImageFont
 import os
 import math
+import hashlib
+import random
+import io
 
 try:
     from rembg import remove as rembg_remove
@@ -19,14 +22,18 @@ class Layer:
         self.visible = visible
         self.opacity = opacity
         self.blend_mode = blend_mode
+        self.mask = None
     def copy(self):
-        return Layer(self.name, self.image.copy(), self.visible, self.opacity, self.blend_mode)
+        c = Layer(self.name, self.image.copy(), self.visible, self.opacity, self.blend_mode)
+        if self.mask is not None:
+            c.mask = self.mask.copy()
+        return c
 
 class ImageEditor:
     def __init__(self, root):
         self.root = root
-        self.root.title("ImageEditor - Milestone 6 FIXED")
-        self.root.geometry("1450x950")
+        self.root.title("ImageEditor - Milestone 9 TIER 5.1 (ComfyUI + A1111 + No Watermark)")
+        self.root.geometry("1500x980")
         self.root.minsize(1250, 800)
 
         self.original_path = None
@@ -42,7 +49,6 @@ class ImageEditor:
         self.redo_stack = []
         self.max_undo = 20
 
-        # Tools
         self.current_tool = tk.StringVar(value="select")
         self.crop_mode = False
         self.crop_start = None
@@ -52,27 +58,258 @@ class ImageEditor:
         self.display_size = (0, 0)
         self.lock_aspect = tk.BooleanVar(value=True)
 
-        # Brush
         self.brush_size = tk.IntVar(value=12)
         self.brush_color = "#ff0000"
+        self.gradient_color2 = "#0000ff"
+        self.gradient_type = tk.StringVar(value="linear")
         self.brush_last_pos = None
         self.is_drawing = False
 
-        # Magic Wand - DEFINED BEFORE UI
         self.wand_tolerance = tk.IntVar(value=32)
         self.wand_contiguous = tk.BooleanVar(value=True)
         self._last_wand_mask = None
 
-        # Clone Stamp
         self.clone_source = None
-        self.clone_offset = None
         self._clone_offset = None
 
-        # Zoom/pan
+        self.lasso_points = []
+        self.lasso_canvas_ids = []
+        self.lasso_active = False
+        self.feather_radius = tk.IntVar(value=5)
+        self.mask_edit_mode = tk.BooleanVar(value=False)
+
+        # Gradient (Tier4)
+        self.gradient_start = None
+        self.gradient_end = None
+        self.gradient_preview_id = None
+
+        # Shadows/Highlights (Tier4)
+        self.shadows_amount = tk.IntVar(value=0)
+        self.highlights_amount = tk.IntVar(value=0)
+
+        # AI Prompt (Tier 5 - Modular Plugin System)
+        self.ai_prompt = tk.StringVar(value="a beautiful sunset over mountains, digital art")
+        self.ai_negative_prompt = tk.StringVar(value="")
+        self.ai_prompt_width = tk.IntVar(value=512)
+        self.ai_prompt_height = tk.IntVar(value=512)
+        self.ai_style = tk.StringVar(value="Realistic")
+        self.ai_api_key = ""
+        self.ai_providers = {}  # Plugin registry
+        self.ai_provider_order = []
+        self.ai_generators_dir = os.path.join(os.path.dirname(__file__) if "__file__" in globals() else os.getcwd(), "ai_generators")
+        self.load_ai_providers()  # Load plugin system
+        try:
+            # Load API key if exists
+            import json
+            if os.path.exists(os.path.expanduser("~/.imageeditor_ai.json")):
+                with open(os.path.expanduser("~/.imageeditor_ai.json"), "r") as f:
+                    data = json.load(f)
+                    self.ai_api_key = data.get("openai_key", "")
+        except:
+            pass
+
+
         self.pan_start = None
+        # AI Plugin config file
+        self.ai_config_path = os.path.expanduser("~/.imageeditor_ai.json")
 
         self.setup_ui()
         self.bind_shortcuts()
+
+    def load_ai_providers(self):
+        # Modular AI Provider Registry - Add new generators without editing main.py!
+        self.ai_providers = {}
+        self.ai_provider_order = []
+        
+        # Built-in providers (you can add more in ai_generators/ folder)
+        self.register_ai_provider("pollinations", {
+            "name": "Pollinations (FREE - No Key)",
+            "description": "Free online AI, no install, no watermark, unlimited",
+            "needs_key": False,
+            "free": True,
+            "func": self.ai_generate_pollinations,
+            "enabled": True
+        })
+        self.register_ai_provider("huggingface", {
+            "name": "HuggingFace Inference (FREE - Optional Token)",
+            "description": "Free SD API, optional HF token for higher rate limits",
+            "needs_key": False,
+            "free": True,
+            "func": self.ai_generate_huggingface,
+            "enabled": True
+        })
+        self.register_ai_provider("openai", {
+            "name": "OpenAI DALL-E 3 ($)",
+            "description": "Best quality, requires OpenAI API key",
+            "needs_key": True,
+            "key_name": "openai_key",
+            "free": False,
+            "func": self.ai_generate_openai_dalle,
+            "enabled": True
+        })
+        self.register_ai_provider("stability", {
+            "name": "Stability AI (SDXL - $)",
+            "description": "Stability.ai API, needs stability_key",
+            "needs_key": True,
+            "key_name": "stability_key",
+            "free": False,
+            "func": self.ai_generate_stability,
+            "enabled": False  # Disabled by default, enable in config
+        })
+        self.register_ai_provider("replicate", {
+            "name": "Replicate (Many models - $)",
+            "description": "replicate.com API, needs replicate_key",
+            "needs_key": True,
+            "key_name": "replicate_key",
+            "free": False,
+            "func": self.ai_generate_replicate,
+            "enabled": False
+        })
+        self.register_ai_provider("automatic1111", {
+            "name": "Automatic1111 WebUI (Local - http://127.0.0.1:7860)",
+            "description": "Local A1111 API, needs A1111 running with --api flag, BEST for local GPU",
+            "needs_key": False,
+            "free": True,
+            "func": self.ai_generate_automatic1111,
+            "enabled": True
+        })
+        self.register_ai_provider("comfyui", {
+            "name": "ComfyUI (Local - http://127.0.0.1:8188)",
+            "description": "Local ComfyUI, needs ComfyUI running, advanced workflows",
+            "needs_key": False,
+            "free": True,
+            "func": self.ai_generate_comfyui,
+            "enabled": True
+        })
+        self.register_ai_provider("local_sd", {
+            "name": "Local Stable Diffusion (diffusers)",
+            "description": "Local SD, needs: pip install diffusers transformers torch",
+            "needs_key": False,
+            "free": True,
+            "func": self.ai_generate_stable_diffusion,
+            "enabled": True
+        })
+        self.register_ai_provider("procedural", {
+            "name": "Procedural Demo (Offline, No Watermark)",
+            "description": "Offline fallback, keyword-based beautiful gradients, NO WATERMARK now!",
+            "needs_key": False,
+            "free": True,
+            "func": self.ai_generate_procedural,
+            "enabled": True
+        })
+        
+        # Load external plugins from ai_generators/ folder
+        self.load_external_ai_plugins()
+        
+        # Load config to enable/disable and order
+        try:
+            import json
+            if os.path.exists(self.ai_config_path):
+                with open(self.ai_config_path, "r") as f:
+                    cfg = json.load(f)
+                    # Restore enabled states
+                    for pid, enabled in cfg.get("providers_enabled", {}).items():
+                        if pid in self.ai_providers:
+                            self.ai_providers[pid]["enabled"] = enabled
+                    # Restore custom providers
+                    for custom in cfg.get("custom_providers", []):
+                        # custom = {"id": "myapi", "name": "...", "url": "...", "type": "openai_compat"}
+                        self.register_custom_api_provider(custom)
+        except Exception as e:
+            print(f"Load AI config error: {e}")
+
+    def register_ai_provider(self, provider_id, info):
+        self.ai_providers[provider_id] = info
+        if provider_id not in self.ai_provider_order:
+            self.ai_provider_order.append(provider_id)
+
+    def load_external_ai_plugins(self):
+        # Scan ai_generators/ for .py files that define register() function
+        try:
+            os.makedirs(self.ai_generators_dir, exist_ok=True)
+            # Create example plugin file if dir empty
+            example_path = os.path.join(self.ai_generators_dir, "_example_plugin.py")
+            if not os.path.exists(example_path):
+                with open(example_path, "w") as f:
+                    f.write('''# Example custom AI generator plugin
+# Place your own .py files in ai_generators/ folder
+# Each file must define register(editor) that calls editor.register_ai_provider()
+
+def generate_my_custom_api(prompt, width, height, style, editor, status_var=None):
+    # Your custom API call here
+    # Must return PIL Image or None
+    import requests
+    from PIL import Image
+    from io import BytesIO
+    # Example: call your local ComfyUI or Automatic1111 API
+    # response = requests.post("http://127.0.0.1:7860/sdapi/v1/txt2img", json={...})
+    # return Image.open(BytesIO(response.content))
+    return None
+
+def register(editor):
+    editor.register_ai_provider("my_custom", {
+        "name": "My Custom API (Example)",
+        "description": "Edit _example_plugin.py to add your own",
+        "needs_key": False,
+        "free": True,
+        "func": lambda p,w,h,s, status=None: generate_my_custom_api(p,w,h,s,editor,status),
+        "enabled": False
+    })
+''')
+            
+            for fname in os.listdir(self.ai_generators_dir):
+                if not fname.endswith(".py") or fname.startswith("_") and fname != "_example_plugin.py":
+                    if fname.startswith("_"):
+                        continue
+                fpath = os.path.join(self.ai_generators_dir, fname)
+                try:
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location(f"ai_gen_{fname[:-3]}", fpath)
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    if hasattr(mod, "register"):
+                        mod.register(self)
+                        print(f"Loaded AI plugin: {fname}")
+                except Exception as e:
+                    print(f"Failed to load plugin {fname}: {e}")
+        except Exception as e:
+            print(f"Plugin scan error: {e}")
+
+    def register_custom_api_provider(self, custom):
+        # custom = {"id": "myapi", "name": "My API", "url": "https://...", "type": "pollinations_compat"}
+        pid = custom.get("id", "custom_"+str(len(self.ai_providers)))
+        def make_func(cfg):
+            def gen_func(prompt, width, height, style, status_var=None):
+                import requests
+                from io import BytesIO
+                url = cfg.get("url", "")
+                # Replace {prompt}, {width}, {height}, {style} in URL
+                url = url.replace("{prompt}", requests.utils.quote(f"{prompt}, {style} style"))
+                url = url.replace("{width}", str(width))
+                url = url.replace("{height}", str(height))
+                url = url.replace("{style}", style)
+                headers = cfg.get("headers", {})
+                # Add API key if present
+                if cfg.get("api_key"):
+                    headers["Authorization"] = f"Bearer {cfg['api_key']}"
+                resp = requests.get(url, headers=headers, timeout=60)
+                if resp.status_code == 200:
+                    return Image.open(BytesIO(resp.content)).convert("RGBA").resize((width,height), Image.LANCZOS)
+                else:
+                    raise Exception(f"Custom API {resp.status_code}: {resp.text[:200]}")
+            return gen_func
+        
+        self.register_ai_provider(pid, {
+            "name": custom.get("name", pid),
+            "description": custom.get("description", f"Custom API: {custom.get('url','')}"),
+            "needs_key": False,
+            "free": True,
+            "func": make_func(custom),
+            "enabled": custom.get("enabled", True),
+            "custom": True,
+            "config": custom
+        })
+
 
     def setup_ui(self):
         menubar = tk.Menu(self.root)
@@ -89,6 +326,10 @@ class ImageEditor:
         layer_menu.add_command(label="Delete Layer  Del", command=self.delete_layer)
         layer_menu.add_command(label="Merge Down  Ctrl+E", command=self.merge_down)
         layer_menu.add_command(label="Flatten Image", command=self.flatten_image)
+        layer_menu.add_separator()
+        layer_menu.add_command(label="Add Layer Mask", command=self.add_layer_mask)
+        layer_menu.add_command(label="Delete Layer Mask", command=self.delete_layer_mask)
+        layer_menu.add_command(label="Apply Mask", command=self.apply_layer_mask)
         menubar.add_cascade(label="Layer", menu=layer_menu)
 
         edit_menu = tk.Menu(menubar, tearoff=0)
@@ -96,10 +337,20 @@ class ImageEditor:
         edit_menu.add_command(label="Redo  Ctrl+Y", command=self.redo)
         menubar.add_cascade(label="Edit", menu=edit_menu)
 
+        select_menu = tk.Menu(menubar, tearoff=0)
+        select_menu.add_command(label="Feather Selection...", command=self.feather_dialog)
+        select_menu.add_command(label="Invert Selection", command=self.invert_selection)
+        select_menu.add_command(label="Clear Selection", command=self.clear_selection)
+        select_menu.add_command(label="Auto Crop to Content", command=self.auto_crop_content)
+        menubar.add_cascade(label="Select", menu=select_menu)
+
         adjust_menu = tk.Menu(menubar, tearoff=0)
         adjust_menu.add_command(label="Levels...", command=self.levels_dialog)
         adjust_menu.add_command(label="Curves...", command=self.curves_dialog)
         adjust_menu.add_command(label="Hue/Saturation...", command=self.hue_saturation_dialog)
+        adjust_menu.add_separator()
+        adjust_menu.add_command(label="Shadows/Highlights... (Tier4)", command=self.shadows_highlights_dialog)
+        adjust_menu.add_command(label="Vignette... (Tier4)", command=self.vignette_dialog)
         menubar.add_cascade(label="Adjust", menu=adjust_menu)
 
         filter_menu = tk.Menu(menubar, tearoff=0)
@@ -113,14 +364,22 @@ class ImageEditor:
         filter_menu.add_command(label="Emboss", command=lambda: self.apply_filter("emboss"))
         filter_menu.add_command(label="Detail", command=lambda: self.apply_filter("detail"))
         filter_menu.add_separator()
-        filter_menu.add_command(label="Black & White High Contrast", command=lambda: self.apply_filter("bw_contrast"))
+        filter_menu.add_command(label="BW High Contrast", command=lambda: self.apply_filter("bw_contrast"))
         menubar.add_cascade(label="Filters", menu=filter_menu)
 
         ai_menu = tk.Menu(menubar, tearoff=0)
+        ai_menu.add_command(label="Generate Image from Prompt...  Ctrl+G", command=self.ai_prompt_dialog)
+        ai_menu.add_command(label="AI Fill Selection with Prompt...", command=self.ai_fill_selection_with_prompt)
+        ai_menu.add_command(label="AI Replace Background with Prompt...", command=self.ai_replace_bg_with_prompt)
+        ai_menu.add_separator()
         ai_menu.add_command(label="Remove Background (AI)  Ctrl+B", command=self.ai_remove_background)
         ai_menu.add_command(label="Upscale 2x (AI)", command=self.ai_upscale)
         ai_menu.add_command(label="Auto Enhance (AI)", command=self.ai_auto_enhance)
         ai_menu.add_command(label="Denoise (AI)", command=self.ai_denoise)
+        ai_menu.add_separator()
+        ai_menu.add_command(label="Manage AI Providers (Add/Remove)...", command=self.ai_manage_providers_dialog)
+        ai_menu.add_command(label="Setup API Keys...", command=self.ai_setup_keys_dialog)
+        ai_menu.add_command(label="Open ai_generators Folder", command=self.ai_open_generators_folder)
         menubar.add_cascade(label="AI", menu=ai_menu)
 
         self.root.config(menu=menubar)
@@ -128,39 +387,40 @@ class ImageEditor:
         self.main_frame = tk.Frame(self.root, bg="#2b2b2b")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # LEFT - Tools
-        self.toolbar = tk.Frame(self.main_frame, bg="#3c3c3c", width=95)
+        # LEFT Tools
+        self.toolbar = tk.Frame(self.main_frame, bg="#3c3c3c", width=105)
         self.toolbar.pack(side=tk.LEFT, fill=tk.Y)
         self.toolbar.pack_propagate(False)
-        tk.Label(self.toolbar, text="TOOLS", bg="#3c3c3c", fg="#aaaaaa", font=("Segoe UI", 8, "bold")).pack(pady=(15,10))
+        tk.Label(self.toolbar, text="TOOLS", bg="#3c3c3c", fg="#aaaaaa", font=("Segoe UI", 8, "bold")).pack(pady=(12,8))
 
-        tools = [("Select", "select"), ("Crop", "crop"), ("Brush", "brush"), ("Eraser", "eraser"), ("Text", "text"), ("Wand", "wand"), ("Clone", "clone")]
+        tools = [("Select", "select"), ("Crop", "crop"), ("Brush", "brush"), ("Eraser", "eraser"), ("Text", "text"), ("Wand", "wand"), ("Lasso", "lasso"), ("Gradient", "gradient"), ("Clone", "clone")]
         for label, mode in tools:
-            b = tk.Radiobutton(self.toolbar, text=label, variable=self.current_tool, value=mode, bg="#3c3c3c", fg="white", selectcolor="#555555", indicatoron=0, width=10, command=self.on_tool_change)
-            b.pack(pady=2, padx=5)
+            b = tk.Radiobutton(self.toolbar, text=label, variable=self.current_tool, value=mode, bg="#3c3c3c", fg="white", selectcolor="#555555", indicatoron=0, width=11, command=self.on_tool_change)
+            b.pack(pady=1, padx=5)
 
-        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=8)
+        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=5)
         self.make_tool_button("Open", self.open_image)
         self.make_tool_button("Crop Apply", self.apply_crop)
-        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=8)
+        self.make_tool_button("Smart Crop", self.auto_crop_content)
+        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=5)
         self.make_tool_button("90 Left", lambda: self.rotate_image(-90))
         self.make_tool_button("90 Right", lambda: self.rotate_image(90))
         self.make_tool_button("Flip H", lambda: self.flip_image("h"))
         self.make_tool_button("Flip V", lambda: self.flip_image("v"))
-        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=8)
+        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=5)
         self.make_tool_button("New Layer", self.add_layer)
+        self.make_tool_button("Add Mask", self.add_layer_mask)
         self.make_tool_button("Merge Down", self.merge_down)
-        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=6)
-        self.make_tool_button("RM Background", self.ai_remove_background)
-        self.make_tool_button("Blur", lambda: self.apply_filter("blur"))
-        self.make_tool_button("Gray", lambda: self.apply_filter("grayscale"))
-        self.make_tool_button("Wand Sel", lambda: self.current_tool.set("wand"))
-        self.make_tool_button("Clone", lambda: self.current_tool.set("clone"))
-        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=6)
+        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=5)
+        self.make_tool_button("✨ AI Prompt", self.ai_prompt_dialog)
+        self.make_tool_button("RM BG", self.ai_remove_background)
+        self.make_tool_button("AI Fill", self.ai_fill_selection_with_prompt)
+        self.make_tool_button("Shadow/HL", self.shadows_highlights_dialog)
+        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=4)
         self.make_tool_button("Zoom In", lambda: self.zoom_step(1.25))
         self.make_tool_button("Zoom Out", lambda: self.zoom_step(0.8))
         self.make_tool_button("Reset Zoom", self.reset_zoom)
-        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=6)
+        ttk.Separator(self.toolbar, orient='horizontal').pack(fill='x', padx=10, pady=4)
         self.make_tool_button("Undo", self.undo)
         self.make_tool_button("Redo", self.redo)
 
@@ -172,6 +432,7 @@ class ImageEditor:
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
         self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
+        self.canvas.bind("<Double-Button-1>", self.on_lasso_close)
         self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
         self.canvas.bind("<Button-4>", lambda e: self.zoom_step(1.1))
         self.canvas.bind("<Button-5>", lambda e: self.zoom_step(0.9))
@@ -179,12 +440,12 @@ class ImageEditor:
         self.canvas.bind("<B2-Motion>", self.on_pan_drag)
         self.canvas.bind("<ButtonPress-3>", self.on_right_click)
 
-        self.status_var = tk.StringVar(value="Milestone 6 FIXED: Ready. Wand and Clone fixed.")
+        self.status_var = tk.StringVar(value="Milestone 8 TIER 4: Gradient + Shadows/Highlights + Vignette ready.")
         status_bar = tk.Label(center_frame, textvariable=self.status_var, anchor="w", bg="#2b2b2b", fg="#cccccc", font=("Segoe UI", 9), padx=10, pady=4)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        # RIGHT - scrollable
-        self.right_panel = tk.Frame(self.main_frame, bg="#2b2b2b", width=380)
+        # RIGHT
+        self.right_panel = tk.Frame(self.main_frame, bg="#2b2b2b", width=410)
         self.right_panel.pack(side=tk.RIGHT, fill=tk.Y)
         self.right_panel.pack_propagate(False)
 
@@ -200,48 +461,74 @@ class ImageEditor:
         self.setup_right_panels()
 
     def setup_right_panels(self):
-        # Brush panel
+        # Brush
         brush_frame = tk.LabelFrame(self.scrollable_frame, text="Brush / Eraser", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
         brush_frame.pack(fill="x", padx=8, pady=6)
-
         tk.Label(brush_frame, text="Size:", bg="#2b2b2b", fg="#cccccc").pack(anchor="w")
-        scale = tk.Scale(brush_frame, from_=1, to=100, orient="horizontal", variable=self.brush_size, bg="#2b2b2b", fg="white", highlightthickness=0, troughcolor="#555555")
-        scale.pack(fill="x")
-
+        tk.Scale(brush_frame, from_=1, to=100, orient="horizontal", variable=self.brush_size, bg="#2b2b2b", fg="white", highlightthickness=0, troughcolor="#555555").pack(fill="x")
         color_row = tk.Frame(brush_frame, bg="#2b2b2b")
         color_row.pack(fill="x", pady=4)
         tk.Label(color_row, text="Color:", bg="#2b2b2b", fg="#cccccc").pack(side="left")
         self.color_preview = tk.Label(color_row, bg=self.brush_color, width=3, relief="sunken")
         self.color_preview.pack(side="left", padx=6)
         tk.Button(color_row, text="Pick", command=self.pick_color, bg="#4a4a4a", fg="white", font=("Segoe UI", 8)).pack(side="left")
-
         tk.Button(brush_frame, text="Add Text...", command=self.add_text_dialog, bg="#4a7a9a", fg="white").pack(fill="x", pady=6)
 
-        # Wand controls
-        wand_frame = tk.LabelFrame(self.scrollable_frame, text="Magic Wand", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
+        # Gradient (Tier4)
+        grad_frame = tk.LabelFrame(self.scrollable_frame, text="Gradient Tool (Tier 4)", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
+        grad_frame.pack(fill="x", padx=8, pady=6)
+        tk.Label(grad_frame, text="Drag on canvas to create gradient", bg="#2b2b2b", fg="#aaaaaa", font=("Segoe UI", 7)).pack(anchor="w")
+        grad_colors = tk.Frame(grad_frame, bg="#2b2b2b")
+        grad_colors.pack(fill="x", pady=4)
+        tk.Label(grad_colors, text="From:", bg="#2b2b2b", fg="#cccccc", font=("Segoe UI", 8)).pack(side="left")
+        self.grad_preview1 = tk.Label(grad_colors, bg=self.brush_color, width=3, relief="sunken")
+        self.grad_preview1.pack(side="left", padx=3)
+        tk.Button(grad_colors, text="Pick1", command=lambda: self.pick_gradient_color(1), bg="#4a4a4a", fg="white", font=("Segoe UI", 7)).pack(side="left", padx=2)
+        tk.Label(grad_colors, text="To:", bg="#2b2b2b", fg="#cccccc", font=("Segoe UI", 8)).pack(side="left", padx=(8,0))
+        self.grad_preview2 = tk.Label(grad_colors, bg=self.gradient_color2, width=3, relief="sunken")
+        self.grad_preview2.pack(side="left", padx=3)
+        tk.Button(grad_colors, text="Pick2", command=lambda: self.pick_gradient_color(2), bg="#4a4a4a", fg="white", font=("Segoe UI", 7)).pack(side="left", padx=2)
+        type_row = tk.Frame(grad_frame, bg="#2b2b2b")
+        type_row.pack(fill="x", pady=2)
+        tk.Label(type_row, text="Type:", bg="#2b2b2b", fg="#cccccc", font=("Segoe UI", 8)).pack(side="left")
+        ttk.Radiobutton(type_row, text="Linear", variable=self.gradient_type, value="linear").pack(side="left", padx=4)
+        ttk.Radiobutton(type_row, text="Radial", variable=self.gradient_type, value="radial").pack(side="left", padx=4)
+
+        # Wand
+        wand_frame = tk.LabelFrame(self.scrollable_frame, text="Wand + Selection", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
         wand_frame.pack(fill="x", padx=8, pady=6)
         tk.Label(wand_frame, text="Tolerance (0-100):", bg="#2b2b2b", fg="#cccccc", font=("Segoe UI", 8)).pack(anchor="w")
         tk.Scale(wand_frame, from_=0, to=100, orient="horizontal", variable=self.wand_tolerance, bg="#2b2b2b", fg="white", troughcolor="#555555", highlightthickness=0).pack(fill="x")
         tk.Checkbutton(wand_frame, text="Contiguous (flood fill)", variable=self.wand_contiguous, bg="#2b2b2b", fg="#cccccc", selectcolor="#3c3c3c").pack(anchor="w")
-        tk.Label(wand_frame, text="Click image to select, then Delete", bg="#2b2b2b", fg="#aaaaaa", font=("Segoe UI", 7)).pack(anchor="w")
         btn_wand_row = tk.Frame(wand_frame, bg="#2b2b2b")
         btn_wand_row.pack(fill="x", pady=4)
-        tk.Button(btn_wand_row, text="Delete Selected", command=lambda: self.apply_wand_delete(self._last_wand_mask) if self._last_wand_mask else None, bg="#9a4a4a", fg="white", font=("Segoe UI", 8)).pack(side="left", padx=2)
+        tk.Button(btn_wand_row, text="Delete Sel", command=lambda: self.apply_wand_delete(self._last_wand_mask) if self._last_wand_mask else None, bg="#9a4a4a", fg="white", font=("Segoe UI", 8)).pack(side="left", padx=2)
+        tk.Button(btn_wand_row, text="Clear Sel", command=self.clear_selection, bg="#4a4a4a", fg="white", font=("Segoe UI", 8)).pack(side="left", padx=2)
 
-        # Clone controls
+        # Lasso + Feather
+        lasso_frame = tk.LabelFrame(self.scrollable_frame, text="Lasso + Feather (Tier 3)", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
+        lasso_frame.pack(fill="x", padx=8, pady=6)
+        tk.Label(lasso_frame, text="Lasso: Draw freehand, double-click to close", bg="#2b2b2b", fg="#aaaaaa", font=("Segoe UI", 7)).pack(anchor="w")
+        tk.Label(lasso_frame, text="Feather radius:", bg="#2b2b2b", fg="#cccccc", font=("Segoe UI", 8)).pack(anchor="w")
+        tk.Scale(lasso_frame, from_=0, to=50, orient="horizontal", variable=self.feather_radius, bg="#2b2b2b", fg="white", troughcolor="#555555", highlightthickness=0).pack(fill="x")
+        feather_row = tk.Frame(lasso_frame, bg="#2b2b2b")
+        feather_row.pack(fill="x", pady=4)
+        tk.Button(feather_row, text="Feather Sel", command=self.apply_feather, bg="#6a5a9a", fg="white", font=("Segoe UI", 8)).pack(side="left", padx=2)
+        tk.Button(feather_row, text="Invert Sel", command=self.invert_selection, bg="#4a4a4a", fg="white", font=("Segoe UI", 8)).pack(side="left", padx=2)
+
+        # Clone
         clone_frame = tk.LabelFrame(self.scrollable_frame, text="Clone Stamp (Alt+Click source)", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
         clone_frame.pack(fill="x", padx=8, pady=6)
         tk.Label(clone_frame, text="Alt+click to set source, then paint", bg="#2b2b2b", fg="#aaaaaa", font=("Segoe UI", 8)).pack(anchor="w")
         self.clone_label = tk.Label(clone_frame, text="Source: not set", bg="#2b2b2b", fg="#cccccc", font=("Segoe UI", 8))
         self.clone_label.pack(anchor="w")
 
-        # Layers panel
-        self.layers_frame = tk.LabelFrame(self.scrollable_frame, text="Layers", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
+        # Layers + Masks
+        self.layers_frame = tk.LabelFrame(self.scrollable_frame, text="Layers + Masks", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
         self.layers_frame.pack(fill="both", expand=False, padx=8, pady=6)
-        self.layers_listbox = tk.Listbox(self.layers_frame, bg="#3c3c3c", fg="white", height=6, selectbackground="#5a5a5a")
+        self.layers_listbox = tk.Listbox(self.layers_frame, bg="#3c3c3c", fg="white", height=5, selectbackground="#5a5a5a")
         self.layers_listbox.pack(fill="x")
         self.layers_listbox.bind("<<ListboxSelect>>", self.on_layer_select)
-
         blend_row = tk.Frame(self.layers_frame, bg="#2b2b2b")
         blend_row.pack(fill="x", pady=4)
         tk.Label(blend_row, text="Blend:", bg="#2b2b2b", fg="#cccccc", font=("Segoe UI", 8)).pack(side="left")
@@ -249,6 +536,42 @@ class ImageEditor:
         blend_combo = ttk.Combobox(blend_row, textvariable=self.blend_var, values=["normal", "multiply", "screen", "overlay", "darken", "lighten"], width=10, state="readonly")
         blend_combo.pack(side="left", padx=4)
         blend_combo.bind("<<ComboboxSelected>>", self.on_blend_change)
+        mask_row = tk.Frame(self.layers_frame, bg="#2b2b2b")
+        mask_row.pack(fill="x", pady=4)
+        tk.Button(mask_row, text="Add Mask", command=self.add_layer_mask, bg="#4a7a4a", fg="white", font=("Segoe UI", 8)).pack(side="left", padx=2)
+        tk.Button(mask_row, text="Del Mask", command=self.delete_layer_mask, bg="#9a4a4a", fg="white", font=("Segoe UI", 8)).pack(side="left", padx=2)
+        tk.Button(mask_row, text="Apply Mask", command=self.apply_layer_mask, bg="#4a4a4a", fg="white", font=("Segoe UI", 8)).pack(side="left", padx=2)
+        tk.Checkbutton(self.layers_frame, text="Edit Mask (paint mask, not image)", variable=self.mask_edit_mode, bg="#2b2b2b", fg="#ffaa55", selectcolor="#3c3c3c", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=2)
+        self.mask_info = tk.Label(self.layers_frame, text="Mask: none", bg="#2b2b2b", fg="#aaaaaa", font=("Segoe UI", 7))
+        self.mask_info.pack(anchor="w")
+
+        # Shadows/Highlights Tier4
+        sh_frame = tk.LabelFrame(self.scrollable_frame, text="Shadows/Highlights + Vignette (Tier 4)", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
+        sh_frame.pack(fill="x", padx=8, pady=6)
+        tk.Button(sh_frame, text="Shadows/Highlights...", command=self.shadows_highlights_dialog, bg="#7a6a4a", fg="white").pack(fill="x", pady=2)
+        tk.Button(sh_frame, text="Vignette...", command=self.vignette_dialog, bg="#4a4a7a", fg="white").pack(fill="x", pady=2)
+        tk.Button(sh_frame, text="Auto Crop Content", command=self.auto_crop_content, bg="#4a7a4a", fg="white").pack(fill="x", pady=2)
+
+        # AI Prompt Generator (Tier 4.5)
+        ai_prompt_frame = tk.LabelFrame(self.scrollable_frame, text="AI Prompt Generator (NEW! Tier 4.5)", bg="#1a2a3a", fg="#7ab8ff", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
+        ai_prompt_frame.pack(fill="x", padx=8, pady=8)
+        tk.Label(ai_prompt_frame, text="Describe what to generate:", bg="#1a2a3a", fg="#7ab8ff", font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        prompt_entry = tk.Entry(ai_prompt_frame, textvariable=self.ai_prompt, bg="#2a3a4a", fg="white", font=("Segoe UI", 9), insertbackground="white")
+        prompt_entry.pack(fill="x", pady=3)
+        tk.Label(ai_prompt_frame, text="Style:", bg="#1a2a3a", fg="#cccccc", font=("Segoe UI", 7)).pack(anchor="w")
+        style_combo = ttk.Combobox(ai_prompt_frame, textvariable=self.ai_style, values=["Realistic", "Digital Art", "Anime", "Oil Painting", "Cyberpunk", "Fantasy", "Minimal"], width=20, state="readonly")
+        style_combo.pack(fill="x", pady=2)
+        size_row = tk.Frame(ai_prompt_frame, bg="#1a2a3a")
+        size_row.pack(fill="x", pady=2)
+        tk.Label(size_row, text="Size:", bg="#1a2a3a", fg="#cccccc", font=("Segoe UI", 8)).pack(side="left")
+        tk.Entry(size_row, textvariable=self.ai_prompt_width, width=5, bg="#2a3a4a", fg="white").pack(side="left", padx=2)
+        tk.Label(size_row, text="x", bg="#1a2a3a", fg="#cccccc").pack(side="left")
+        tk.Entry(size_row, textvariable=self.ai_prompt_height, width=5, bg="#2a3a4a", fg="white").pack(side="left", padx=2)
+        btn_row_ai = tk.Frame(ai_prompt_frame, bg="#1a2a3a")
+        btn_row_ai.pack(fill="x", pady=4)
+        tk.Button(btn_row_ai, text="✨ Generate", command=self.ai_prompt_dialog, bg="#5a8aff", fg="white", font=("Segoe UI", 9, "bold")).pack(side="left", padx=2, fill="x", expand=True)
+        tk.Button(btn_row_ai, text="Fill Sel", command=self.ai_fill_selection_with_prompt, bg="#7a5aff", fg="white", font=("Segoe UI", 8)).pack(side="left", padx=2)
+
 
         # Adjustments
         adj_frame = tk.LabelFrame(self.scrollable_frame, text="Adjustments", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
@@ -281,10 +604,9 @@ class ImageEditor:
         tk.Checkbutton(resize_frame, text="Lock aspect", variable=self.lock_aspect, bg="#2b2b2b", fg="#cccccc", selectcolor="#3c3c3c").pack(anchor="w", pady=2)
         tk.Button(resize_frame, text="Apply Resize", command=self.apply_resize, bg="#4a4a4a", fg="white").pack(fill="x", pady=4)
 
-        # Zoom info
         zoom_frame = tk.LabelFrame(self.scrollable_frame, text="View", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
         zoom_frame.pack(fill="x", padx=8, pady=6)
-        self.zoom_label = tk.Label(zoom_frame, text="Zoom: 100% (Wheel=zoom, Middle-drag=pan)", bg="#2b2b2b", fg="#aaaaaa", font=("Segoe UI", 8))
+        self.zoom_label = tk.Label(zoom_frame, text="Zoom: 100%", bg="#2b2b2b", fg="#aaaaaa", font=("Segoe UI", 8))
         self.zoom_label.pack(anchor="w")
 
     def make_tool_button(self, text, command):
@@ -293,9 +615,11 @@ class ImageEditor:
 
     def on_tool_change(self):
         tool = self.current_tool.get()
-        self.status_var.set(f"Tool: {tool} | Zoom {int(self.zoom*100)}%")
-        cursors = {"select": "arrow", "crop": "crosshair", "brush": "pencil", "eraser": "dotbox", "text": "xterm", "wand": "tcross", "clone": "crosshair"}
+        self.status_var.set(f"Tool: {tool} | Zoom {int(self.zoom*100)}% | Colors: {self.brush_color} -> {self.gradient_color2}")
+        cursors = {"select": "arrow", "crop": "crosshair", "brush": "pencil", "eraser": "dotbox", "text": "xterm", "wand": "tcross", "lasso": "crosshair", "gradient": "crosshair", "clone": "crosshair"}
         self.canvas.config(cursor=cursors.get(tool, "crosshair"))
+        if tool != "lasso":
+            self.clear_lasso_visual()
 
     def bind_shortcuts(self):
         self.root.bind("<Control-o>", lambda e: self.open_image())
@@ -305,6 +629,7 @@ class ImageEditor:
         self.root.bind("<Control-l>", lambda e: self.add_layer())
         self.root.bind("<Control-e>", lambda e: self.merge_down())
         self.root.bind("<Control-b>", lambda e: self.ai_remove_background())
+        self.root.bind("<Control-g>", lambda e: self.ai_prompt_dialog())
         self.root.bind("<Delete>", lambda e: self.delete_layer())
 
     def push_undo(self, action=""):
@@ -338,11 +663,17 @@ class ImageEditor:
         for i, l in enumerate(reversed(self.layers)):
             idx = len(self.layers)-1 - i
             sel = " <ACTIVE>" if idx == self.active_layer_idx else ""
-            self.layers_listbox.insert(tk.END, f"{l.name}{sel} {'(hidden)' if not l.visible else ''}")
+            mask_txt = " [MASK]" if l.mask is not None else ""
+            self.layers_listbox.insert(tk.END, f"{l.name}{sel}{mask_txt} {'(hidden)' if not l.visible else ''}")
         if self.layers:
             rev_idx = len(self.layers)-1 - self.active_layer_idx
             self.layers_listbox.selection_clear(0, tk.END)
             self.layers_listbox.selection_set(rev_idx)
+            active = self.layers[self.active_layer_idx]
+            if active.mask is not None:
+                self.mask_info.config(text=f"Mask: {active.mask.size[0]}x{active.mask.size[1]} | EditMode={self.mask_edit_mode.get()}")
+            else:
+                self.mask_info.config(text="Mask: none")
 
     def on_layer_select(self, e):
         sel = self.layers_listbox.curselection()
@@ -352,6 +683,7 @@ class ImageEditor:
         self.active_layer_idx = len(self.layers)-1 - rev_idx
         if self.layers:
             self.blend_var.set(self.layers[self.active_layer_idx].blend_mode)
+        self.refresh_layers_list()
         self.display_composite()
 
     def on_blend_change(self, e):
@@ -415,8 +747,15 @@ class ImageEditor:
                 continue
             if base is None:
                 base = l.image.copy()
+                if l.mask is not None:
+                    alpha = base.split()[3]
+                    m = l.mask
+                    if m.size != alpha.size:
+                        m = m.resize(alpha.size, Image.LANCZOS)
+                    alpha = ImageChops.multiply(alpha, m)
+                    base.putalpha(alpha)
             else:
-                base = self.composite_two(Layer("tmp", base), l)
+                base = self.composite_two(Layer("base", base), l)
         self.layers = [Layer("Background", base.copy())]
         self.active_layer_idx = 0
         self.refresh_layers_list()
@@ -431,6 +770,13 @@ class ImageEditor:
             upper = upper.convert("RGBA")
         if lower.mode != "RGBA":
             lower = lower.convert("RGBA")
+        if upper_layer.mask is not None:
+            mask = upper_layer.mask
+            if mask.size != upper.size:
+                mask = mask.resize(upper.size, Image.LANCZOS)
+            alpha = upper.split()[3]
+            alpha = ImageChops.multiply(alpha, mask)
+            upper.putalpha(alpha)
         mode = getattr(upper_layer, 'blend_mode', 'normal')
         if mode == "normal":
             blended_rgb = upper
@@ -466,6 +812,13 @@ class ImageEditor:
                 continue
             if base is None:
                 base = l.image.copy()
+                if l.mask is not None:
+                    alpha = base.split()[3]
+                    m = l.mask
+                    if m.size != alpha.size:
+                        m = m.resize(alpha.size, Image.LANCZOS)
+                    alpha = ImageChops.multiply(alpha, m)
+                    base.putalpha(alpha)
             else:
                 base = self.composite_two(Layer("base", base), l)
         return base
@@ -509,6 +862,8 @@ class ImageEditor:
             return
         self.push_undo(f"Rotate {angle}")
         self.layers[self.active_layer_idx].image = self.layers[self.active_layer_idx].image.rotate(angle, expand=True, resample=Image.BICUBIC)
+        if self.layers[self.active_layer_idx].mask is not None:
+            self.layers[self.active_layer_idx].mask = self.layers[self.active_layer_idx].mask.rotate(angle, expand=True, resample=Image.BICUBIC)
         self.display_composite()
         self.update_resize_entries()
 
@@ -518,6 +873,8 @@ class ImageEditor:
         self.push_undo(f"Flip {direction}")
         layer = self.layers[self.active_layer_idx]
         layer.image = ImageOps.mirror(layer.image) if direction=="h" else ImageOps.flip(layer.image)
+        if layer.mask is not None:
+            layer.mask = ImageOps.mirror(layer.mask) if direction=="h" else ImageOps.flip(layer.mask)
         self.display_composite()
 
     def apply_filter(self, name):
@@ -576,6 +933,19 @@ class ImageEditor:
         if c[1]:
             self.brush_color = c[1]
             self.color_preview.config(bg=self.brush_color)
+            self.grad_preview1.config(bg=self.brush_color)
+
+    def pick_gradient_color(self, which):
+        init = self.brush_color if which==1 else self.gradient_color2
+        c = colorchooser.askcolor(initialcolor=init)
+        if c[1]:
+            if which==1:
+                self.brush_color = c[1]
+                self.color_preview.config(bg=c[1])
+                self.grad_preview1.config(bg=c[1])
+            else:
+                self.gradient_color2 = c[1]
+                self.grad_preview2.config(bg=c[1])
 
     def canvas_to_image_coords(self, cx, cy):
         if self.composited_image is None:
@@ -591,6 +961,18 @@ class ImageEditor:
         iy = int(ry * ih)
         return (ix, iy)
 
+    def image_to_canvas_coords(self, ix, iy):
+        if self.composited_image is None:
+            return None
+        iw, ih = self.layers[self.active_layer_idx].image.size if self.layers else self.composited_image.size
+        ox, oy = self.image_offset
+        dw, dh = self.display_size
+        rx = ix / iw
+        ry = iy / ih
+        cx = ox + rx * dw
+        cy = oy + ry * dh
+        return (cx, cy)
+
     def on_canvas_press(self, event):
         tool = self.current_tool.get()
         if tool == "crop":
@@ -601,6 +983,10 @@ class ImageEditor:
             self.on_text_click(event)
         elif tool == "wand":
             self.on_wand_click(event)
+        elif tool == "lasso":
+            self.on_lasso_press(event)
+        elif tool == "gradient":
+            self.on_gradient_press(event)
         elif tool == "clone":
             coords = self.canvas_to_image_coords(event.x, event.y)
             if coords:
@@ -617,6 +1003,10 @@ class ImageEditor:
             self.on_crop_drag(event)
         elif tool in ("brush", "eraser"):
             self.on_brush_drag(event)
+        elif tool == "lasso":
+            self.on_lasso_drag(event)
+        elif tool == "gradient":
+            self.on_gradient_drag(event)
         elif tool == "clone":
             self.on_clone_drag(event)
 
@@ -626,6 +1016,10 @@ class ImageEditor:
             self.on_crop_release(event)
         elif tool in ("brush", "eraser"):
             self.on_brush_release(event)
+        elif tool == "lasso":
+            self.on_lasso_release(event)
+        elif tool == "gradient":
+            self.on_gradient_release(event)
         elif tool == "clone":
             self.on_brush_release(event)
 
@@ -655,13 +1049,26 @@ class ImageEditor:
         self.display_composite()
 
     def draw_brush_line(self, p1, p2):
-        layer_img = self.layers[self.active_layer_idx].image
+        layer = self.layers[self.active_layer_idx]
+        size = self.brush_size.get()
+        tool = self.current_tool.get()
+        if self.mask_edit_mode.get() and layer.mask is not None:
+            mask = layer.mask
+            if mask.mode != "L":
+                mask = mask.convert("L")
+            draw = ImageDraw.Draw(mask)
+            color = 255 if tool == "brush" else 0
+            draw.line([p1, p2], fill=color, width=size, joint="curve")
+            draw.ellipse([p1[0]-size//2, p1[1]-size//2, p1[0]+size//2, p1[1]+size//2], fill=color)
+            layer.mask = mask
+            self.refresh_layers_list()
+            self.display_composite()
+            return
+        layer_img = layer.image
         if layer_img.mode != "RGBA":
             layer_img = layer_img.convert("RGBA")
-            self.layers[self.active_layer_idx].image = layer_img
+            layer.image = layer_img
         draw = ImageDraw.Draw(layer_img)
-        tool = self.current_tool.get()
-        size = self.brush_size.get()
         if tool == "eraser":
             color = (0,0,0,0)
             draw.line([p1, p2], fill=color, width=size, joint="curve")
@@ -677,7 +1084,7 @@ class ImageEditor:
             alpha_draw.line([p1, p2], fill=0, width=size, joint="curve")
             alpha_draw.ellipse([p1[0]-size//2, p1[1]-size//2, p1[0]+size//2, p1[1]+size//2], fill=0)
             layer_img.putalpha(alpha)
-        self.layers[self.active_layer_idx].image = layer_img
+        layer.image = layer_img
         self.display_composite()
 
     def on_text_click(self, event):
@@ -763,7 +1170,430 @@ class ImageEditor:
         self.display_composite()
 
     def count_mask_pixels(self, mask):
-        return sum(1 for p in mask.getdata() if p > 0)
+        return sum(1 for v in mask.get_flattened_data() if v>0) if hasattr(mask, 'get_flattened_data') else sum(1 for p in mask.getdata() if p>0)
+
+    # LASSO
+    def on_lasso_press(self, event):
+        if not self.layers:
+            return
+        coords = self.canvas_to_image_coords(event.x, event.y)
+        if coords is None:
+            return
+        if not self.lasso_active:
+            self.lasso_points = [coords]
+            self.lasso_active = True
+            self.clear_lasso_visual()
+        else:
+            self.lasso_points.append(coords)
+        self.draw_lasso_visual()
+
+    def on_lasso_drag(self, event):
+        if not self.lasso_active or not self.layers:
+            return
+        coords = self.canvas_to_image_coords(event.x, event.y)
+        if coords is None:
+            return
+        if len(self.lasso_points) == 0 or ((coords[0]-self.lasso_points[-1][0])**2 + (coords[1]-self.lasso_points[-1][1])**2) > 25:
+            self.lasso_points.append(coords)
+            self.draw_lasso_visual()
+
+    def on_lasso_release(self, event):
+        pass
+
+    def on_lasso_close(self, event):
+        if not self.lasso_active or len(self.lasso_points) < 3:
+            return
+        self.push_undo("Lasso selection")
+        mask = self.create_lasso_mask()
+        if mask:
+            r = self.feather_radius.get()
+            if r > 0:
+                mask = mask.filter(ImageFilter.GaussianBlur(radius=r))
+            self._last_wand_mask = mask
+            cnt = self.count_mask_pixels(mask)
+            self.status_var.set(f"Lasso selected {cnt} pixels, feather={r}. Press Delete Selected.")
+            self.display_composite_with_mask(mask)
+        self.lasso_active = False
+        self.lasso_points = []
+        self.clear_lasso_visual()
+
+    def create_lasso_mask(self):
+        if not self.layers or len(self.lasso_points) < 3:
+            return None
+        w,h = self.layers[self.active_layer_idx].image.size
+        mask = Image.new("L", (w,h), 0)
+        draw = ImageDraw.Draw(mask)
+        draw.polygon(self.lasso_points, fill=255)
+        return mask
+
+    def draw_lasso_visual(self):
+        self.clear_lasso_visual()
+        if len(self.lasso_points) < 2:
+            return
+        for i in range(len(self.lasso_points)-1):
+            p1 = self.image_to_canvas_coords(self.lasso_points[i][0], self.lasso_points[i][1])
+            p2 = self.image_to_canvas_coords(self.lasso_points[i+1][0], self.lasso_points[i+1][1])
+            if p1 and p2:
+                line_id = self.canvas.create_line(p1[0], p1[1], p2[0], p2[1], fill="#00ff00", width=2, dash=(3,3))
+                self.lasso_canvas_ids.append(line_id)
+
+    def clear_lasso_visual(self):
+        for lid in self.lasso_canvas_ids:
+            try:
+                self.canvas.delete(lid)
+            except:
+                pass
+        self.lasso_canvas_ids = []
+
+    def apply_feather(self):
+        if self._last_wand_mask is None:
+            messagebox.showinfo("Feather", "Make a selection first (Wand or Lasso)")
+            return
+        self.push_undo(f"Feather {self.feather_radius.get()}px")
+        r = self.feather_radius.get()
+        if r > 0:
+            self._last_wand_mask = self._last_wand_mask.filter(ImageFilter.GaussianBlur(radius=r))
+            self.display_composite_with_mask(self._last_wand_mask)
+            self.status_var.set(f"Feathered selection by {r}px!")
+
+    def feather_dialog(self):
+        if self._last_wand_mask is None:
+            messagebox.showinfo("Feather", "Make a selection first")
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Feather Selection")
+        dialog.geometry("350x180")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        tk.Label(dialog, text="Feather radius (soft edge)", font=("Segoe UI", 10, "bold")).pack(pady=10)
+        radius_var = tk.IntVar(value=self.feather_radius.get())
+        tk.Scale(dialog, from_=0, to=50, orient="horizontal", variable=radius_var, length=250).pack()
+        original_mask = self._last_wand_mask.copy()
+        def preview(*args):
+            r = radius_var.get()
+            if r == 0:
+                self._last_wand_mask = original_mask.copy()
+            else:
+                self._last_wand_mask = original_mask.filter(ImageFilter.GaussianBlur(radius=r))
+            self.display_composite_with_mask(self._last_wand_mask)
+        radius_var.trace_add("write", lambda *a: preview())
+        def on_ok():
+            self.feather_radius.set(radius_var.get())
+            dialog.destroy()
+        def on_cancel():
+            self._last_wand_mask = original_mask
+            self.display_composite_with_mask(self._last_wand_mask)
+            dialog.destroy()
+        row = tk.Frame(dialog)
+        row.pack(pady=10)
+        tk.Button(row, text="Cancel", command=on_cancel).pack(side="left", padx=6)
+        tk.Button(row, text="OK", command=on_ok, bg="#6a5a9a", fg="white").pack(side="left", padx=6)
+
+    def invert_selection(self):
+        if self._last_wand_mask is None:
+            return
+        self.push_undo("Invert selection")
+        self._last_wand_mask = ImageOps.invert(self._last_wand_mask)
+        self.display_composite_with_mask(self._last_wand_mask)
+
+    def clear_selection(self):
+        self._last_wand_mask = None
+        self.lasso_points = []
+        self.lasso_active = False
+        self.clear_lasso_visual()
+        self.display_composite()
+        self.status_var.set("Selection cleared")
+
+    # MASKS
+    def add_layer_mask(self):
+        if not self.layers:
+            return
+        self.push_undo("Add layer mask")
+        layer = self.layers[self.active_layer_idx]
+        w,h = layer.image.size
+        layer.mask = Image.new("L", (w,h), 255)
+        self.refresh_layers_list()
+        self.display_composite()
+        self.status_var.set(f"Added white mask to {layer.name}.")
+
+    def delete_layer_mask(self):
+        if not self.layers or self.layers[self.active_layer_idx].mask is None:
+            return
+        self.push_undo("Delete mask")
+        self.layers[self.active_layer_idx].mask = None
+        self.mask_edit_mode.set(False)
+        self.refresh_layers_list()
+        self.display_composite()
+
+    def apply_layer_mask(self):
+        if not self.layers or self.layers[self.active_layer_idx].mask is None:
+            return
+        self.push_undo("Apply mask")
+        layer = self.layers[self.active_layer_idx]
+        img = layer.image.convert("RGBA")
+        alpha = img.split()[3]
+        m = layer.mask
+        if m.size != alpha.size:
+            m = m.resize(alpha.size, Image.LANCZOS)
+        alpha = ImageChops.multiply(alpha, m)
+        img.putalpha(alpha)
+        layer.image = img
+        layer.mask = None
+        self.mask_edit_mode.set(False)
+        self.refresh_layers_list()
+        self.display_composite()
+
+    # ===== TIER 4: GRADIENT =====
+    def on_gradient_press(self, event):
+        coords = self.canvas_to_image_coords(event.x, event.y)
+        if coords is None:
+            return
+        self.gradient_start = coords
+        self.gradient_end = coords
+
+    def on_gradient_drag(self, event):
+        if self.gradient_start is None:
+            return
+        coords = self.canvas_to_image_coords(event.x, event.y)
+        if coords is None:
+            return
+        self.gradient_end = coords
+        # Draw preview line on canvas
+        if self.gradient_preview_id:
+            try:
+                self.canvas.delete(self.gradient_preview_id)
+            except:
+                pass
+        c1 = self.image_to_canvas_coords(self.gradient_start[0], self.gradient_start[1])
+        c2 = self.image_to_canvas_coords(self.gradient_end[0], self.gradient_end[1])
+        if c1 and c2:
+            self.gradient_preview_id = self.canvas.create_line(c1[0], c1[1], c2[0], c2[1], fill="#00ffff", width=3, arrow=tk.LAST)
+
+    def on_gradient_release(self, event):
+        if self.gradient_start is None or self.gradient_end is None or not self.layers:
+            return
+        if self.gradient_preview_id:
+            try:
+                self.canvas.delete(self.gradient_preview_id)
+            except:
+                pass
+            self.gradient_preview_id = None
+        start = self.gradient_start
+        end = self.gradient_end
+        self.gradient_start = self.gradient_end = None
+        if ((start[0]-end[0])**2 + (start[1]-end[1])**2) < 25:
+            return
+        self.push_undo("Gradient")
+        self.apply_gradient(start, end)
+        self.display_composite()
+
+    def apply_gradient(self, start, end):
+        layer = self.layers[self.active_layer_idx]
+        w,h = layer.image.size
+        # Parse colors
+        def hex_to_rgb(hx):
+            hx = hx.lstrip("#")
+            return (int(hx[0:2],16), int(hx[2:4],16), int(hx[4:6],16))
+        c1 = hex_to_rgb(self.brush_color)
+        c2 = hex_to_rgb(self.gradient_color2)
+        gtype = self.gradient_type.get()
+        grad_img = Image.new("RGBA", (w,h), (0,0,0,0))
+        if gtype == "linear":
+            # Linear gradient along line start->end
+            dx = end[0]-start[0]
+            dy = end[1]-start[1]
+            length = math.hypot(dx, dy)
+            if length == 0:
+                return
+            # For each pixel, project onto gradient vector
+            for y in range(h):
+                for x in range(w):
+                    # Vector from start to pixel
+                    px = x - start[0]
+                    py = y - start[1]
+                    # Projection t = dot / |grad|^2
+                    t = (px*dx + py*dy) / (length*length)
+                    t = max(0.0, min(1.0, t))
+                    r = int(c1[0]*(1-t) + c2[0]*t)
+                    g = int(c1[1]*(1-t) + c2[1]*t)
+                    b = int(c1[2]*(1-t) + c2[2]*t)
+                    grad_img.putpixel((x,y), (r,g,b,255))
+        else:  # radial
+            cx, cy = start
+            radius = math.hypot(end[0]-start[0], end[1]-start[1])
+            if radius == 0:
+                radius = 1
+            for y in range(h):
+                for x in range(w):
+                    dist = math.hypot(x-cx, y-cy)
+                    t = dist / radius
+                    t = max(0.0, min(1.0, t))
+                    r = int(c1[0]*(1-t) + c2[0]*t)
+                    g = int(c1[1]*(1-t) + c2[1]*t)
+                    b = int(c1[2]*(1-t) + c2[2]*t)
+                    grad_img.putpixel((x,y), (r,g,b,255))
+        # Composite gradient onto layer, respecting selection mask if any
+        if self._last_wand_mask is not None and self._last_wand_mask.size == (w,h):
+            layer_img = layer.image.convert("RGBA")
+            # Use mask to blend gradient only in selected area
+            layer_img = Image.composite(grad_img, layer_img, self._last_wand_mask)
+            layer.image = layer_img
+        else:
+            # If mask edit mode, gradient goes to mask? No, to image
+            # Alpha composite gradient over layer with opacity based on brush size? Simplify: paste with 100% opacity
+            layer_img = layer.image.convert("RGBA")
+            layer_img = Image.alpha_composite(layer_img, grad_img)
+            layer.image = layer_img
+
+    # ===== TIER 4: SHADOWS/HIGHLIGHTS =====
+    def shadows_highlights_dialog(self):
+        if not self.layers:
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Shadows / Highlights (Tier 4)")
+        dialog.geometry("420x300")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        tk.Label(dialog, text="Recover Shadows & Highlights", font=("Segoe UI", 11, "bold")).pack(pady=10)
+        sh_var = tk.IntVar(value=30)
+        hl_var = tk.IntVar(value=30)
+        tk.Label(dialog, text="Shadows (brighten dark areas):").pack(anchor="w", padx=12)
+        tk.Scale(dialog, from_=0, to=100, orient="horizontal", variable=sh_var, length=350).pack()
+        tk.Label(dialog, text="Highlights (darken bright areas):").pack(anchor="w", padx=12)
+        tk.Scale(dialog, from_=0, to=100, orient="horizontal", variable=hl_var, length=350).pack()
+        original = self.layers[self.active_layer_idx].image.copy()
+        def apply_sh(*args):
+            img = original.copy().convert("RGBA")
+            sh = sh_var.get() / 100.0
+            hl = hl_var.get() / 100.0
+            if sh == 0 and hl == 0:
+                self.layers[self.active_layer_idx].image = img
+                self.display_composite()
+                return
+            # Process each pixel: luminance based
+            r,g,b,a = img.split()
+            rgb = Image.merge("RGB", (r,g,b))
+            # Apply shadows/highlights via simple curves
+            def sh_map(p):
+                # p 0-255, luminance approx
+                # Brighten shadows: increase low values
+                if p < 128:
+                    factor = (128 - p) / 128.0
+                    p = p + int(factor * sh * 80)
+                # Darken highlights: decrease high values
+                if p > 128:
+                    factor = (p - 128) / 127.0
+                    p = p - int(factor * hl * 60)
+                return max(0, min(255, p))
+            r = r.point(sh_map); g = g.point(sh_map); b = b.point(sh_map)
+            img = Image.merge("RGBA", (r,g,b,a))
+            self.layers[self.active_layer_idx].image = img
+            self.display_composite()
+        sh_var.trace_add("write", lambda *a: apply_sh())
+        hl_var.trace_add("write", lambda *a: apply_sh())
+        def on_ok(): dialog.destroy()
+        def on_cancel():
+            self.layers[self.active_layer_idx].image = original
+            self.display_composite()
+            dialog.destroy()
+        row = tk.Frame(dialog)
+        row.pack(pady=12)
+        tk.Button(row, text="Cancel", command=on_cancel, width=10).pack(side="left", padx=6)
+        tk.Button(row, text="OK", command=on_ok, bg="#7a6a4a", fg="white", width=10).pack(side="left", padx=6)
+
+    def vignette_dialog(self):
+        if not self.layers:
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Vignette (Tier 4)")
+        dialog.geometry("400x250")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        tk.Label(dialog, text="Vignette - darken edges", font=("Segoe UI", 11, "bold")).pack(pady=10)
+        strength = tk.IntVar(value=40)
+        tk.Label(dialog, text="Strength:").pack(anchor="w", padx=12)
+        tk.Scale(dialog, from_=0, to=100, orient="horizontal", variable=strength, length=350).pack()
+        original = self.layers[self.active_layer_idx].image.copy()
+        def apply_vig(*args):
+            img = original.copy().convert("RGBA")
+            s = strength.get() / 100.0
+            if s == 0:
+                self.layers[self.active_layer_idx].image = img
+                self.display_composite()
+                return
+            w,h = img.size
+            # Create vignette mask: radial gradient dark at edges
+            vig = Image.new("L", (w,h), 0)
+            cx, cy = w//2, h//2
+            max_dist = math.hypot(cx, cy)
+            for y in range(h):
+                for x in range(w):
+                    dist = math.hypot(x-cx, y-cy) / max_dist
+                    # dist 0 center, 1 corner
+                    # vignette: darken proportional to dist^2 * strength
+                    darken = int((dist**1.8) * s * 180)
+                    vig.putpixel((x,y), min(255, darken))
+            # Darken image by vignette
+            # Create black overlay with vignette alpha
+            black = Image.new("RGBA", (w,h), (0,0,0,255))
+            img = Image.composite(black, img, vig) if False else img  # We'll use blend
+            # Simpler: multiply brightness by (1 - darken/255)
+            r,g,b,a = img.split()
+            def vig_map_factory(darken_img):
+                # Not efficient per pixel but okay for demo
+                return darken_img
+            # Use ImageChops? Let's do pixel loop for small images, for large use faster
+            # Fast version: create darkened version
+            dark_factor = 1.0 - s*0.7
+            # Apply radial darkening via alpha composite
+            overlay = Image.new("RGBA", (w,h), (0,0,0,0))
+            draw = ImageDraw.Draw(overlay)
+            # Draw black with varying alpha? Use vig as alpha
+            overlay.putalpha(vig)
+            # Composite black over image with vignette alpha
+            img = Image.alpha_composite(img, overlay)
+            self.layers[self.active_layer_idx].image = img
+            self.display_composite()
+        strength.trace_add("write", lambda *a: apply_vig())
+        def on_ok(): dialog.destroy()
+        def on_cancel():
+            self.layers[self.active_layer_idx].image = original
+            self.display_composite()
+            dialog.destroy()
+        row = tk.Frame(dialog)
+        row.pack(pady=12)
+        tk.Button(row, text="Cancel", command=on_cancel, width=10).pack(side="left", padx=6)
+        tk.Button(row, text="OK", command=on_ok, bg="#4a4a7a", fg="white", width=10).pack(side="left", padx=6)
+
+    def auto_crop_content(self):
+        if not self.layers:
+            return
+        # Find bounding box of non-transparent pixels in composite or active layer
+        self.push_undo("Auto Crop to Content")
+        comp = self.get_composite()
+        if comp is None:
+            return
+        # Use alpha to find content bounds
+        if comp.mode != "RGBA":
+            comp = comp.convert("RGBA")
+        alpha = comp.split()[3]
+        bbox = alpha.getbbox()
+        if bbox is None:
+            messagebox.showinfo("Auto Crop", "Image is fully transparent")
+            return
+        # Add small padding
+        pad = 5
+        x0,y0,x1,y1 = bbox
+        x0 = max(0, x0-pad); y0 = max(0, y0-pad)
+        x1 = min(comp.size[0], x1+pad); y1 = min(comp.size[1], y1+pad)
+        # Crop all layers
+        for layer in self.layers:
+            layer.image = layer.image.crop((x0,y0,x1,y1))
+            if layer.mask is not None:
+                layer.mask = layer.mask.crop((x0,y0,x1,y1))
+        self.display_composite()
+        self.update_resize_entries()
+        self.status_var.set(f"Auto-cropped to content: {x1-x0}x{y1-y0} from {comp.size[0]}x{comp.size[1]}")
 
     def set_clone_source(self, img_x, img_y):
         self.clone_source = (img_x, img_y)
@@ -917,11 +1747,10 @@ class ImageEditor:
         menu.add_command(label="Reset Zoom (100%)", command=self.reset_zoom)
         menu.add_separator()
         menu.add_command(label="Add Text Here", command=lambda: self.add_text_dialog(prefill_pos=self.canvas_to_image_coords(event.x, event.y)))
+        menu.add_command(label="Feather Selection", command=self.feather_dialog)
+        menu.add_command(label="Clear Selection", command=self.clear_selection)
+        menu.add_command(label="Shadows/Highlights", command=self.shadows_highlights_dialog)
         menu.tk_popup(event.x_root, event.y_root)
-
-    def toggle_crop_mode(self):
-        self.current_tool.set("crop" if self.current_tool.get() != "crop" else "select")
-        self.on_tool_change()
 
     def on_crop_press(self, event):
         if self.current_tool.get() != "crop" or not self.layers:
@@ -938,6 +1767,11 @@ class ImageEditor:
         x0,y0 = self.crop_start
         x1,y1 = event.x, event.y
         self.crop_rect_id = self.canvas.create_rectangle(x0,y0,x1,y1, outline="#00ff00", width=2, dash=(4,4))
+        # Draw rule-of-thirds guides (Tier4)
+        mid_x = (x0+x1)//2
+        mid_y = (y0+y1)//2
+        self.canvas.create_line(x0, mid_y, x1, mid_y, fill="#ffffff", dash=(2,2))
+        self.canvas.create_line(mid_x, y0, mid_x, y1, fill="#ffffff", dash=(2,2))
 
     def on_crop_release(self, event):
         if not self.crop_start or self.current_tool.get() != "crop":
@@ -968,6 +1802,8 @@ class ImageEditor:
                 iy0, iy1 = max(0, min(iy0,iy1)), min(ih, max(iy0,iy1))
                 if ix1-ix0 > 5 and iy1-iy0 > 5:
                     layer.image = layer.image.crop((ix0,iy0,ix1,iy1))
+                    if layer.mask is not None:
+                        layer.mask = layer.mask.crop((ix0,iy0,ix1,iy1))
             self.crop_coords = None
             if self.crop_rect_id:
                 self.canvas.delete(self.crop_rect_id)
@@ -1020,6 +1856,8 @@ class ImageEditor:
             self.push_undo(f"Resize to {new_w}x{new_h}")
             for layer in self.layers:
                 layer.image = layer.image.resize((new_w, new_h), Image.LANCZOS)
+                if layer.mask is not None:
+                    layer.mask = layer.mask.resize((new_w, new_h), Image.LANCZOS)
             self.display_composite()
             self.update_resize_entries()
         except Exception as e:
@@ -1046,22 +1884,6 @@ class ImageEditor:
         self.refresh_layers_list()
         self.display_composite()
         self.update_resize_entries()
-
-    def reset_image(self):
-        if not self.layers or not self.original_path:
-            return
-        if not messagebox.askyesno("Reset", "Reset to original? Remove extra layers?"):
-            return
-        try:
-            img = Image.open(self.original_path).convert("RGBA")
-            self.push_undo("Reset to original")
-            self.layers = [Layer("Background", img, True, 1.0)]
-            self.active_layer_idx = 0
-            self.refresh_layers_list()
-            self.display_composite()
-            self.update_resize_entries()
-        except Exception as e:
-            messagebox.showerror("Reset Error", str(e))
 
     def save_as(self):
         if self.composited_image is None:
@@ -1135,8 +1957,7 @@ class ImageEditor:
         shadows.trace_add("write", lambda *a: apply_preview())
         mid.trace_add("write", lambda *a: apply_preview())
         highlights.trace_add("write", lambda *a: apply_preview())
-        def on_ok():
-            dialog.destroy()
+        def on_ok(): dialog.destroy()
         def on_cancel():
             self.layers[self.active_layer_idx].image = original
             self.display_composite()
@@ -1237,7 +2058,926 @@ class ImageEditor:
         tk.Button(btn_row, text="Cancel", command=on_cancel).pack(side="left", padx=4)
         tk.Button(btn_row, text="OK", command=on_ok, bg="#4a7a9a", fg="white").pack(side="left", padx=4)
 
+    # ===== TIER 4.5: AI PROMPT GENERATION =====
+    def ai_open_generators_folder(self):
+        try:
+            os.makedirs(self.ai_generators_dir, exist_ok=True)
+            os.startfile(self.ai_generators_dir)
+        except Exception as e:
+            # Cross-platform
+            try:
+                import subprocess, sys
+                if sys.platform == "darwin":
+                    subprocess.Popen(["open", self.ai_generators_dir])
+                else:
+                    subprocess.Popen(["xdg-open", self.ai_generators_dir])
+            except:
+                messagebox.showinfo("Generators Folder", f"Folder: {self.ai_generators_dir}\n\nPlace .py files there that define register(editor) to add custom AI generators!")
+
+    def ai_manage_providers_dialog(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Manage AI Providers - Modular System")
+        dialog.geometry("700x500")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        tk.Label(dialog, text="AI Providers - Enable/Disable & Add Custom", font=("Segoe UI", 12, "bold")).pack(pady=10)
+        tk.Label(dialog, text="Check enabled providers will be tried in Auto mode. Add new ones via custom API or .py files in ai_generators/", wraplength=650, justify="left").pack(pady=2)
+        
+        # List frame with checkboxes
+        list_frame = tk.Frame(dialog)
+        list_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        canvas = tk.Canvas(list_frame)
+        scrollbar = tk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        scrollable = tk.Frame(canvas)
+        scrollable.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0,0), window=scrollable, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        vars_dict = {}
+        for pid in self.ai_provider_order:
+            info = self.ai_providers.get(pid, {})
+            row = tk.Frame(scrollable, relief="groove", borderwidth=1)
+            row.pack(fill="x", pady=2, padx=2)
+            
+            var = tk.BooleanVar(value=info.get("enabled", True))
+            vars_dict[pid] = var
+            tk.Checkbutton(row, variable=var).pack(side="left")
+            tk.Label(row, text=info.get("name",""), font=("Segoe UI", 9, "bold"), width=35, anchor="w").pack(side="left", padx=5)
+            tk.Label(row, text=info.get("description","")[:60], font=("Segoe UI", 7), fg="#666666", width=45, anchor="w").pack(side="left")
+            tk.Label(row, text="FREE" if info.get("free") else "$", fg="green" if info.get("free") else "orange", font=("Segoe UI", 8, "bold")).pack(side="left", padx=5)
+        
+        # Add custom provider section
+        add_frame = tk.LabelFrame(dialog, text="Add Custom API Provider (No Coding)", padx=8, pady=6)
+        add_frame.pack(fill="x", padx=10, pady=8)
+        
+        tk.Label(add_frame, text="Name:").grid(row=0, column=0, sticky="w")
+        custom_name_var = tk.StringVar(value="My Custom Generator")
+        tk.Entry(add_frame, textvariable=custom_name_var, width=20).grid(row=0, column=1, padx=5)
+        
+        tk.Label(add_frame, text="API URL (use {prompt}, {width}, {height}):").grid(row=0, column=2, sticky="w", padx=(10,0))
+        custom_url_var = tk.StringVar(value="https://image.pollinations.ai/prompt/{prompt}?width={width}&height={height}&nologo=true")
+        tk.Entry(add_frame, textvariable=custom_url_var, width=40).grid(row=0, column=3, padx=5)
+        
+        def add_custom():
+            custom = {
+                "id": f"custom_{len(self.ai_providers)}",
+                "name": custom_name_var.get(),
+                "url": custom_url_var.get(),
+                "description": f"Custom API: {custom_url_var.get()[:40]}",
+                "enabled": True
+            }
+            self.register_custom_api_provider(custom)
+            # Save to config
+            try:
+                import json
+                cfg = {}
+                if os.path.exists(self.ai_config_path):
+                    with open(self.ai_config_path, "r") as f:
+                        cfg = json.load(f)
+                cfg.setdefault("custom_providers", []).append(custom)
+                with open(self.ai_config_path, "w") as f:
+                    json.dump(cfg, f, indent=2)
+                messagebox.showinfo("Added", f"Added custom provider: {custom['name']}\nRestart dialog to see it!")
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+        
+        tk.Button(add_frame, text="+ Add Custom Provider", command=add_custom, bg="#4a7a4a", fg="white").grid(row=0, column=4, padx=10)
+        
+        def save_and_close():
+            # Save enabled states
+            try:
+                import json
+                cfg = {}
+                if os.path.exists(self.ai_config_path):
+                    with open(self.ai_config_path, "r") as f:
+                        cfg = json.load(f)
+                cfg["providers_enabled"] = {pid: var.get() for pid, var in vars_dict.items()}
+                with open(self.ai_config_path, "w") as f:
+                    json.dump(cfg, f, indent=2)
+                # Apply to current providers
+                for pid, var in vars_dict.items():
+                    if pid in self.ai_providers:
+                        self.ai_providers[pid]["enabled"] = var.get()
+                messagebox.showinfo("Saved", "Provider settings saved! Auto mode will now use only enabled providers.")
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+            dialog.destroy()
+        
+        btn_row = tk.Frame(dialog)
+        btn_row.pack(pady=10)
+        tk.Button(btn_row, text="Cancel", command=dialog.destroy, width=10).pack(side="left", padx=5)
+        tk.Button(btn_row, text="Open Generators Folder", command=self.ai_open_generators_folder, bg="#4a4a4a", fg="white").pack(side="left", padx=5)
+        tk.Button(btn_row, text="Save & Close", command=save_and_close, bg="#4a7a9a", fg="white", width=15).pack(side="left", padx=5)
+
+    def ai_setup_keys_dialog(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("AI Setup")
+        dialog.geometry("500x300")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        tk.Label(dialog, text="AI Image Generation Setup", font=("Segoe UI", 12, "bold")).pack(pady=10)
+        tk.Label(dialog, text="For REAL AI images (not procedural demo), you need:", font=("Segoe UI", 9), wraplength=450, justify="left").pack(pady=5, padx=10)
+        text = tk.Text(dialog, height=10, wrap="word")
+        text.pack(fill="both", expand=True, padx=10, pady=5)
+        instructions = """Option 1 - FREE Local (Recommended for class):
+  pip install diffusers transformers torch accelerate
+  Then it will use Stable Diffusion locally.
+
+Option 2 - OpenAI DALL-E (Best quality, costs money):
+  1. Get API key from platform.openai.com
+  2. pip install openai
+  3. Paste key below
+
+Option 3 - Demo Mode (Current):
+  No install needed! Uses procedural generation based on your prompt keywords.
+  Example prompts:
+  - 'sunset over mountains' -> orange/purple gradient
+  - 'ocean waves' -> blue tones
+  - 'forest at night' -> green dark
+  - 'cyberpunk city' -> neon
+
+Current Status:"""
+        text.insert("1.0", instructions)
+        # Check what's installed
+        status = "\n"
+        try:
+            import diffusers
+            status += "✓ diffusers installed - Local SD available\n"
+        except:
+            status += "✗ diffusers NOT installed (pip install diffusers)\n"
+        try:
+            import openai
+            status += "✓ openai installed\n"
+        except:
+            status += "✗ openai NOT installed\n"
+        try:
+            from rembg import remove
+            status += "✓ rembg installed - BG removal works\n"
+        except:
+            status += "✗ rembg NOT installed\n"
+        text.insert("end", status)
+        text.config(state="disabled")
+
+        # HuggingFace token
+        hf_row = tk.Frame(dialog)
+        hf_row.pack(fill="x", padx=10, pady=5)
+        tk.Label(hf_row, text="HF Token (FREE - huggingface.co/settings/tokens):").pack(side="left")
+        hf_var = tk.StringVar(value="")
+        try:
+            import json
+            if os.path.exists(os.path.expanduser("~/.imageeditor_ai.json")):
+                with open(os.path.expanduser("~/.imageeditor_ai.json"), "r") as f:
+                    data = json.load(f)
+                    hf_var.set(data.get("hf_token", ""))
+        except:
+            pass
+        tk.Entry(hf_row, textvariable=hf_var, width=25).pack(side="left", padx=5, fill="x", expand=True)
+
+        key_row = tk.Frame(dialog)
+        key_row.pack(fill="x", padx=10, pady=8)
+        tk.Label(key_row, text="OpenAI API Key:").pack(side="left")
+        key_var = tk.StringVar(value=self.ai_api_key)
+        tk.Entry(key_row, textvariable=key_var, width=35, show="*").pack(side="left", padx=5, fill="x", expand=True)
+        def save_key():
+            self.ai_api_key = key_var.get()
+            try:
+                import json
+                data = {}
+                if os.path.exists(os.path.expanduser("~/.imageeditor_ai.json")):
+                    with open(os.path.expanduser("~/.imageeditor_ai.json"), "r") as f:
+                        data = json.load(f)
+                data["openai_key"] = key_var.get()
+                data["hf_token"] = hf_var.get()
+                with open(os.path.expanduser("~/.imageeditor_ai.json"), "w") as f:
+                    json.dump(data, f)
+                messagebox.showinfo("Saved", f"Keys saved!\nOpenAI: {'set' if key_var.get() else 'empty'}\nHF: {'set' if hf_var.get() else 'empty (optional, Pollinations works without)'}")
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+            dialog.destroy()
+        tk.Button(key_row, text="Save", command=save_key, bg="#4a7a9a", fg="white").pack(side="left", padx=4)
+        tk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=6)
+
+    def ai_prompt_dialog(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("✨ AI Generate Image from Prompt - Tier 4.5")
+        dialog.geometry("600x520")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(bg="#1e1e1e")
+
+        header = tk.Frame(dialog, bg="#1a2a3a", height=50)
+        header.pack(fill="x")
+        tk.Label(header, text="✨ AI Image Prompt Generator", font=("Segoe UI", 14, "bold"), bg="#1a2a3a", fg="#7ab8ff").pack(pady=10)
+        tk.Label(header, text="Integrated into AI pipeline - generates as new layer!", font=("Segoe UI", 8), bg="#1a2a3a", fg="#aaaaaa").pack()
+
+        # Prompt
+        prompt_frame = tk.Frame(dialog, bg="#1e1e1e")
+        prompt_frame.pack(fill="x", padx=15, pady=10)
+        tk.Label(prompt_frame, text="Prompt (describe what you want):", bg="#1e1e1e", fg="white", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        prompt_text = tk.Text(prompt_frame, height=3, bg="#2a2a2a", fg="white", insertbackground="white", font=("Segoe UI", 10), wrap="word")
+        prompt_text.pack(fill="x", pady=5)
+        prompt_text.insert("1.0", self.ai_prompt.get())
+
+        tk.Label(prompt_frame, text="Negative Prompt (what to avoid):", bg="#1e1e1e", fg="#aaaaaa", font=("Segoe UI", 8)).pack(anchor="w", pady=(8,0))
+        neg_entry = tk.Entry(prompt_frame, textvariable=self.ai_negative_prompt, bg="#2a2a2a", fg="#aaaaaa")
+        neg_entry.pack(fill="x", pady=2)
+
+        # Options row
+        opts = tk.Frame(dialog, bg="#1e1e1e")
+        opts.pack(fill="x", padx=15, pady=5)
+        tk.Label(opts, text="Style:", bg="#1e1e1e", fg="#cccccc").pack(side="left")
+        style_var = tk.StringVar(value=self.ai_style.get())
+        style_combo = ttk.Combobox(opts, textvariable=style_var, values=["Realistic", "Digital Art", "Anime", "Oil Painting", "Cyberpunk", "Fantasy", "Minimal", "Photographic"], width=14, state="readonly")
+        style_combo.pack(side="left", padx=5)
+        tk.Label(opts, text="Width:", bg="#1e1e1e", fg="#cccccc").pack(side="left", padx=(15,2))
+        w_var = tk.IntVar(value=self.ai_prompt_width.get())
+        tk.Entry(opts, textvariable=w_var, width=5, bg="#2a2a2a", fg="white").pack(side="left")
+        tk.Label(opts, text="Height:", bg="#1e1e1e", fg="#cccccc").pack(side="left", padx=2)
+        h_var = tk.IntVar(value=self.ai_prompt_height.get())
+        tk.Entry(opts, textvariable=h_var, width=5, bg="#2a2a2a", fg="white").pack(side="left")
+
+        # Model selection
+        model_frame = tk.Frame(dialog, bg="#1e1e1e")
+        model_frame.pack(fill="x", padx=15, pady=5)
+        tk.Label(model_frame, text="AI Engine:", bg="#1e1e1e", fg="#cccccc", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        engine_var = tk.StringVar(value="Auto (best available)")
+        engine_combo = ttk.Combobox(model_frame, textvariable=engine_var, values=["Auto (best available) - NOW WITH FREE ONLINE AI!", "FREE Online AI (Pollinations - No Install!)", "HuggingFace Free API", "Local Stable Diffusion (diffusers)", "OpenAI DALL-E 3 (needs API key)", "Procedural Demo (no install)"], width=50, state="readonly")
+        engine_combo.pack(fill="x", pady=2)
+
+        status_var = tk.StringVar(value="Ready to generate! Your prompt will become a new layer.")
+        status_label = tk.Label(dialog, textvariable=status_var, bg="#1e1e1e", fg="#7ab8ff", font=("Segoe UI", 8), wraplength=550)
+        status_label.pack(pady=5)
+
+        def do_generate():
+            prompt = prompt_text.get("1.0", "end-1c").strip()
+            if not prompt:
+                messagebox.showinfo("Prompt", "Enter a prompt!")
+                return
+            self.ai_prompt.set(prompt)
+            self.ai_style.set(style_var.get())
+            self.ai_prompt_width.set(w_var.get())
+            self.ai_prompt_height.set(h_var.get())
+            status_var.set(f"Generating '{prompt[:40]}...' with {style_var.get()} style...")
+            dialog.update()
+            try:
+                width = max(64, min(1024, w_var.get()))
+                height = max(64, min(1024, h_var.get()))
+                engine = engine_var.get()
+                img = self.ai_generate_from_prompt(prompt, width, height, style_var.get(), engine, status_var)
+                if img:
+                    self.push_undo(f"AI Generate: {prompt[:20]}")
+                    # Add as new layer
+                    new_layer = Layer(f"AI: {prompt[:25]}", img.convert("RGBA"))
+                    self.layers.append(new_layer)
+                    self.active_layer_idx = len(self.layers)-1
+                    self.refresh_layers_list()
+                    self.display_composite()
+                    self.status_var.set(f"✨ AI Generated: {prompt[:40]} -> new layer! Style: {style_var.get()}")
+                    status_var.set("Done! Added as new layer. Close this dialog.")
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                messagebox.showerror("AI Generate Error", str(e))
+                status_var.set(f"Error: {e}")
+
+        btn_row = tk.Frame(dialog, bg="#1e1e1e")
+        btn_row.pack(fill="x", padx=15, pady=12)
+        tk.Button(btn_row, text="Cancel", command=dialog.destroy, width=10).pack(side="left", padx=5)
+        tk.Button(btn_row, text="Setup / Install Help", command=self.ai_setup_keys_dialog, bg="#4a4a4a", fg="white").pack(side="left", padx=5)
+        tk.Button(btn_row, text="✨ GENERATE AS NEW LAYER", command=do_generate, bg="#5a8aff", fg="white", font=("Segoe UI", 11, "bold"), width=25).pack(side="right", padx=5)
+
+    def ai_generate_from_prompt(self, prompt, width, height, style, engine, status_var=None):
+        # Modular plugin system - tries enabled providers in order
+        # Engine string can be "Auto" or specific provider name
+        
+        # If specific engine requested, try that first
+        if engine and "Auto" not in engine and "best available" not in engine:
+            # Find provider by name match
+            for pid, info in self.ai_providers.items():
+                if info["name"].lower() in engine.lower() or pid.lower() in engine.lower():
+                    if info.get("enabled", True):
+                        try:
+                            if status_var:
+                                status_var.set(f"Trying {info['name']}...")
+                            img = info["func"](prompt, width, height, style, status_var)
+                            if img:
+                                return img
+                        except Exception as e:
+                            if status_var:
+                                status_var.set(f"{info['name']} failed: {e}")
+                            print(f"{pid} failed: {e}")
+        
+        # Auto mode: try all enabled providers in order
+        for pid in self.ai_provider_order:
+            info = self.ai_providers.get(pid)
+            if not info or not info.get("enabled", True):
+                continue
+            # Skip providers needing key if no key
+            if info.get("needs_key"):
+                key_name = info.get("key_name", "openai_key")
+                try:
+                    import json
+                    has_key = False
+                    if os.path.exists(self.ai_config_path):
+                        with open(self.ai_config_path, "r") as f:
+                            cfg = json.load(f)
+                            has_key = bool(cfg.get(key_name))
+                    if not has_key and key_name == "openai_key":
+                        has_key = bool(self.ai_api_key)
+                    if not has_key:
+                        continue
+                except:
+                    continue
+            
+            try:
+                if status_var:
+                    status_var.set(f"Trying {info['name']}...")
+                img = info["func"](prompt, width, height, style, status_var)
+                if img:
+                    if status_var:
+                        status_var.set(f"✓ Generated with {info['name']}!")
+                    return img
+            except Exception as e:
+                print(f"Provider {pid} failed: {e}")
+                if status_var:
+                    status_var.set(f"{info['name']} failed, trying next...")
+        
+        # Last resort procedural (now no watermark!)
+        if status_var:
+            status_var.set("Using procedural fallback (no watermark)...")
+        return self.ai_generate_procedural(prompt, width, height, style)
+
+    def ai_generate_pollinations(self, prompt, width, height, style, status_var=None):
+        # Pollinations - FREE, no watermark, no key - BEST FOR DEFAULT
+        import requests
+        from io import BytesIO
+        import urllib.parse
+        full_prompt = f"{prompt}, {style} style, highly detailed, 8k, photorealistic, sharp focus"
+        encoded = urllib.parse.quote(full_prompt)
+        # Random seed for variety but deterministic per prompt if you want
+        seed = abs(hash(prompt)) % 1000000
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true&seed={seed}&enhance=true"
+        if status_var:
+            status_var.set("Calling Pollinations FREE AI (no watermark)...")
+        resp = requests.get(url, timeout=60)
+        if resp.status_code == 200 and len(resp.content) > 1000:
+            img = Image.open(BytesIO(resp.content)).convert("RGBA")
+            # Resize to exact requested size
+            if img.size != (width, height):
+                img = img.resize((width, height), Image.LANCZOS)
+            return img
+        else:
+            raise Exception(f"Pollinations {resp.status_code}")
+
+    def ai_generate_stability(self, prompt, width, height, style, status_var=None):
+        # Stability AI API
+        import requests
+        from io import BytesIO
+        import json
+        stability_key = ""
+        try:
+            if os.path.exists(self.ai_config_path):
+                with open(self.ai_config_path, "r") as f:
+                    cfg = json.load(f)
+                    stability_key = cfg.get("stability_key", "")
+        except:
+            pass
+        if not stability_key:
+            raise Exception("No stability_key in config")
+        
+        url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {stability_key}"
+        }
+        payload = {
+            "text_prompts": [{"text": f"{prompt}, {style} style"}],
+            "cfg_scale": 7,
+            "height": height,
+            "width": width,
+            "steps": 30,
+        }
+        if status_var:
+            status_var.set("Calling Stability AI...")
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        if resp.status_code == 200:
+            data = resp.json()
+            import base64
+            img_data = base64.b64decode(data["artifacts"][0]["base64"])
+            img = Image.open(BytesIO(img_data)).convert("RGBA")
+            return img
+        else:
+            raise Exception(f"Stability {resp.status_code}: {resp.text[:200]}")
+
+    def ai_generate_replicate(self, prompt, width, height, style, status_var=None):
+        # Replicate API - supports many models
+        import requests
+        import time
+        from io import BytesIO
+        import json
+        replicate_key = ""
+        try:
+            if os.path.exists(self.ai_config_path):
+                with open(self.ai_config_path, "r") as f:
+                    cfg = json.load(f)
+                    replicate_key = cfg.get("replicate_key", "")
+        except:
+            pass
+        if not replicate_key:
+            raise Exception("No replicate_key")
+        
+        # Example: SDXL model
+        url = "https://api.replicate.com/v1/predictions"
+        headers = {"Authorization": f"Token {replicate_key}", "Content-Type": "application/json"}
+        payload = {
+            "version": "39ed52f2a227617c90befa27b5b37c55b18b997",  # SDXL
+            "input": {"prompt": f"{prompt}, {style} style", "width": width, "height": height}
+        }
+        if status_var:
+            status_var.set("Calling Replicate...")
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        if resp.status_code != 201:
+            raise Exception(f"Replicate create {resp.status_code}")
+        pred = resp.json()
+        # Poll for result
+        for _ in range(30):
+            time.sleep(2)
+            r = requests.get(pred["urls"]["get"], headers=headers, timeout=15)
+            data = r.json()
+            if data["status"] == "succeeded":
+                img_url = data["output"][0]
+                img_resp = requests.get(img_url, timeout=30)
+                return Image.open(BytesIO(img_resp.content)).convert("RGBA").resize((width,height), Image.LANCZOS)
+            elif data["status"] == "failed":
+                raise Exception("Replicate failed")
+        raise Exception("Replicate timeout")
+
+    def ai_generate_automatic1111(self, prompt, width, height, style, status_var=None):
+        # Automatic1111 WebUI API - most popular local SD UI
+        # Requires: A1111 running with --api --listen
+        # Start A1111: webui.bat --api --listen
+        import requests
+        from io import BytesIO
+        import base64
+        
+        # Config - allow custom URL from config
+        a1111_url = "http://127.0.0.1:7860"
+        try:
+            import json
+            if os.path.exists(self.ai_config_path):
+                with open(self.ai_config_path, "r") as f:
+                    cfg = json.load(f)
+                    a1111_url = cfg.get("a1111_url", a1111_url)
+        except:
+            pass
+        
+        url = f"{a1111_url}/sdapi/v1/txt2img"
+        
+        # Check if A1111 is running
+        try:
+            if status_var:
+                status_var.set(f"Connecting to Automatic1111 at {a1111_url}...")
+            # Quick health check
+            health = requests.get(f"{a1111_url}/sdapi/v1/sd-models", timeout=2)
+            if health.status_code != 200:
+                raise Exception("A1111 not responding")
+        except Exception as e:
+            raise Exception(f"Automatic1111 not running at {a1111_url}. Start it with: webui.bat --api --listen\nError: {e}")
+        
+        payload = {
+            "prompt": f"{prompt}, {style} style, highly detailed, 8k, photorealistic",
+            "negative_prompt": self.ai_negative_prompt.get() or "blurry, low quality, watermark, text",
+            "width": width,
+            "height": height,
+            "steps": 20,
+            "cfg_scale": 7,
+            "sampler_name": "DPM++ 2M Karras",
+            "batch_size": 1,
+            "n_iter": 1,
+            "enable_hr": False,
+        }
+        
+        if status_var:
+            status_var.set(f"A1111 generating: {prompt[:40]}... (local GPU)")
+        
+        resp = requests.post(url, json=payload, timeout=120)
+        if resp.status_code == 200:
+            data = resp.json()
+            # A1111 returns base64 images
+            img_b64 = data["images"][0]
+            # Remove data URL prefix if present
+            if "," in img_b64:
+                img_b64 = img_b64.split(",")[1]
+            img_data = base64.b64decode(img_b64)
+            img = Image.open(BytesIO(img_data)).convert("RGBA")
+            return img
+        else:
+            raise Exception(f"A1111 API error {resp.status_code}: {resp.text[:300]}")
+
+    def ai_generate_comfyui(self, prompt, width, height, style, status_var=None):
+        # ComfyUI API - powerful node-based workflow
+        # Requires: ComfyUI running (python main.py)
+        import requests
+        import json
+        from io import BytesIO
+        import time
+        import uuid
+        
+        comfy_url = "http://127.0.0.1:8188"
+        try:
+            if os.path.exists(self.ai_config_path):
+                with open(self.ai_config_path, "r") as f:
+                    cfg = json.load(f)
+                    comfy_url = cfg.get("comfy_url", comfy_url)
+        except:
+            pass
+        
+        # Check if ComfyUI is running
+        try:
+            if status_var:
+                status_var.set(f"Connecting to ComfyUI at {comfy_url}...")
+            health = requests.get(f"{comfy_url}/system_stats", timeout=2)
+        except Exception as e:
+            raise Exception(f"ComfyUI not running at {comfy_url}. Start ComfyUI with: python main.py\nError: {e}")
+        
+        # Simple workflow: Text prompt -> SD -> VAE Decode -> Save
+        # This is a minimal workflow for txt2img
+        client_id = str(uuid.uuid4())
+        workflow = {
+            "3": {
+                "inputs": {
+                    "seed": abs(hash(prompt)) % 1000000000,
+                    "steps": 20,
+                    "cfg": 7,
+                    "sampler_name": "euler",
+                    "scheduler": "normal",
+                    "denoise": 1,
+                    "model": ["4", 0],
+                    "positive": ["6", 0],
+                    "negative": ["7", 0],
+                    "latent_image": ["5", 0]
+                },
+                "class_type": "KSampler"
+            },
+            "4": {
+                "inputs": {
+                    "ckpt_name": "v1-5-pruned-emaonly.ckpt"  # User needs this model
+                },
+                "class_type": "CheckpointLoaderSimple"
+            },
+            "5": {
+                "inputs": {
+                    "width": width,
+                    "height": height,
+                    "batch_size": 1
+                },
+                "class_type": "EmptyLatentImage"
+            },
+            "6": {
+                "inputs": {
+                    "text": f"{prompt}, {style} style, highly detailed",
+                    "clip": ["4", 1]
+                },
+                "class_type": "CLIPTextEncode"
+            },
+            "7": {
+                "inputs": {
+                    "text": self.ai_negative_prompt.get() or "watermark, text, blurry",
+                    "clip": ["4", 1]
+                },
+                "class_type": "CLIPTextEncode"
+            },
+            "8": {
+                "inputs": {
+                    "samples": ["3", 0],
+                    "vae": ["4", 2]
+                },
+                "class_type": "VAEDecode"
+            },
+            "9": {
+                "inputs": {
+                    "filename_prefix": "ImageEditor_ComfyUI",
+                    "images": ["8", 0]
+                },
+                "class_type": "SaveImage"
+            }
+        }
+        
+        if status_var:
+            status_var.set(f"ComfyUI generating: {prompt[:40]}...")
+        
+        # Queue prompt
+        payload = {"prompt": workflow, "client_id": client_id}
+        resp = requests.post(f"{comfy_url}/prompt", json=payload, timeout=10)
+        if resp.status_code != 200:
+            raise Exception(f"ComfyUI queue error {resp.status_code}: {resp.text[:300]}")
+        
+        prompt_id = resp.json()["prompt_id"]
+        
+        # Poll for result via websocket or history
+        # Simple polling: check history
+        for _ in range(60):  # 60 attempts = 2 minutes
+            time.sleep(2)
+            hist_resp = requests.get(f"{comfy_url}/history/{prompt_id}", timeout=10)
+            if hist_resp.status_code == 200:
+                hist = hist_resp.json()
+                if prompt_id in hist:
+                    outputs = hist[prompt_id].get("outputs", {})
+                    if "9" in outputs and outputs["9"].get("images"):
+                        # Get image
+                        img_info = outputs["9"]["images"][0]
+                        img_url = f"{comfy_url}/view?filename={img_info['filename']}&subfolder={img_info.get('subfolder','')}&type={img_info.get('type','output')}"
+                        img_resp = requests.get(img_url, timeout=30)
+                        if img_resp.status_code == 200:
+                            img = Image.open(BytesIO(img_resp.content)).convert("RGBA")
+                            # Resize if needed
+                            if img.size != (width, height):
+                                img = img.resize((width, height), Image.LANCZOS)
+                            return img
+        raise Exception("ComfyUI timeout - image not ready in 2 minutes")
+
+
+
+    def ai_generate_huggingface(self, prompt, width, height, style, status_var=None):
+        # FREE HuggingFace Inference API - works without local install!
+        # Get free token from huggingface.co/settings/tokens (read-only)
+        try:
+            import requests
+            from io import BytesIO
+            
+            # Try without token first (public), then with token if available
+            hf_token = ""
+            try:
+                import json
+                if os.path.exists(os.path.expanduser("~/.imageeditor_ai.json")):
+                    with open(os.path.expanduser("~/.imageeditor_ai.json"), "r") as f:
+                        data = json.load(f)
+                        hf_token = data.get("hf_token", "") or data.get("huggingface_token", "")
+            except:
+                pass
+            
+            # Use Pollinations or HuggingFace free endpoint
+            # Option 1: Pollinations AI (completely free, no key)
+            try:
+                if status_var:
+                    status_var.set("Calling FREE online AI (Pollinations)...")
+                # Pollinations - free, no API key needed!
+                full_prompt = f"{prompt}, {style} style, highly detailed, 8k, photorealistic"
+                # URL encode prompt
+                import urllib.parse
+                encoded = urllib.parse.quote(full_prompt)
+                url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true&seed={hash(prompt) % 100000}"
+                
+                resp = requests.get(url, timeout=30)
+                if resp.status_code == 200:
+                    img = Image.open(BytesIO(resp.content)).convert("RGBA")
+                    img = img.resize((width, height), Image.LANCZOS)
+                    if status_var:
+                        status_var.set("✓ Got REAL AI image from FREE online API!")
+                    return img
+            except Exception as e:
+                print(f"Pollinations failed: {e}")
+            
+            # Option 2: HuggingFace Inference API
+            API_URL = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5"
+            headers = {}
+            if hf_token:
+                headers["Authorization"] = f"Bearer {hf_token}"
+            
+            full_prompt = f"{prompt}, {style} style, highly detailed"
+            if status_var:
+                status_var.set(f"Calling HuggingFace SD: {full_prompt[:40]}...")
+            
+            payload = {"inputs": full_prompt, "parameters": {"width": width, "height": height}}
+            response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
+            
+            if response.status_code == 200:
+                img = Image.open(BytesIO(response.content)).convert("RGBA")
+                return img
+            else:
+                print(f"HF API error {response.status_code}: {response.text[:200]}")
+                raise Exception(f"HF API {response.status_code}")
+                
+        except Exception as e:
+            print(f"HuggingFace generation error: {e}")
+            raise
+
+
+    def ai_generate_openai_dalle(self, prompt, width, height, style, status_var=None):
+        try:
+            import openai
+            if not self.ai_api_key:
+                return None
+            client = openai.OpenAI(api_key=self.ai_api_key)
+            full_prompt = f"{prompt}, {style} style, highly detailed, 8k"
+            # DALL-E 3 sizes
+            size = "1024x1024"
+            if width <= 512 and height <= 512:
+                size = "1024x1024"
+            elif width > height:
+                size = "1792x1024"
+            else:
+                size = "1024x1792"
+            if status_var:
+                status_var.set(f"Calling OpenAI DALL-E 3: {full_prompt[:50]}...")
+            response = client.images.generate(
+                model="dall-e-3",
+                prompt=full_prompt,
+                size=size,
+                quality="standard",
+                n=1
+            )
+            import requests
+            from io import BytesIO
+            image_url = response.data[0].url
+            if status_var:
+                status_var.set("Downloading generated image...")
+            resp = requests.get(image_url)
+            img = Image.open(BytesIO(resp.content)).convert("RGBA")
+            img = img.resize((width, height), Image.LANCZOS)
+            return img
+        except Exception as e:
+            print(f"OpenAI DALL-E error: {e}")
+            raise
+
+    def ai_generate_stable_diffusion(self, prompt, width, height, style, status_var=None):
+        try:
+            from diffusers import StableDiffusionPipeline
+            import torch
+            if status_var:
+                status_var.set("Loading Stable Diffusion model (first time downloads ~4GB)...")
+            model_id = "runwayml/stable-diffusion-v1-5"
+            # Use smaller model if available
+            pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32)
+            if torch.cuda.is_available():
+                pipe = pipe.to("cuda")
+            full_prompt = f"{prompt}, {style} style, highly detailed"
+            if status_var:
+                status_var.set(f"Generating with SD: {full_prompt[:40]}...")
+            image = pipe(full_prompt, width=width, height=height, num_inference_steps=20).images[0]
+            return image.convert("RGBA")
+        except Exception as e:
+            print(f"Stable Diffusion error: {e}")
+            raise
+
+    def ai_generate_procedural(self, prompt, width, height, style):
+        # Procedural beautiful generator - deterministic based on prompt hash
+        # This is the DEMO that works with NO installs, but looks like AI art
+        seed = int(hashlib.md5(prompt.lower().encode()).hexdigest()[:8], 16)
+        random.seed(seed)
+
+        img = Image.new("RGBA", (width, height), (0,0,0,255))
+        draw = ImageDraw.Draw(img, "RGBA")
+
+        # Keyword-based color palettes
+        prompt_lower = prompt.lower()
+        palette = None
+        if any(k in prompt_lower for k in ["sunset", "sunrise", "dusk", "evening"]):
+            palette = [(255,94,77), (255,154,0), (255,206,84), (255,94,77), (150,50,100)]
+        elif any(k in prompt_lower for k in ["ocean", "sea", "water", "beach", "wave"]):
+            palette = [(0,119,182), (0,180,216), (72,202,228), (173,232,244), (2,62,138)]
+        elif any(k in prompt_lower for k in ["forest", "trees", "nature", "jungle", "wood"]):
+            palette = [(45,106,79), (64,145,108), (82,183,136), (116,198,157), (27,67,50)]
+        elif any(k in prompt_lower for k in ["cyberpunk", "neon", "city", "night city", "future"]):
+            palette = [(255,0,110), (131,56,236), (58,134,255), (255,190,11), (0,0,0)]
+        elif any(k in prompt_lower for k in ["mountain", "snow", "winter", "alps"]):
+            palette = [(248,249,250), (222,226,230), (173,181,189), (108,117,125), (52,58,64)]
+        elif any(k in prompt_lower for k in ["space", "galaxy", "stars", "nebula", "cosmos"]):
+            palette = [(10,10,30), (50,20,100), (100,50,150), (200,100,255), (0,0,0)]
+        elif any(k in prompt_lower for k in ["fire", "lava", "volcano", "flame"]):
+            palette = [(255,0,0), (255,69,0), (255,140,0), (255,215,0), (50,0,0)]
+        else:
+            # Random beautiful palette based on seed
+            base_hue = random.random()
+            palette = []
+            for i in range(5):
+                import colorsys
+                h = (base_hue + i*0.15) % 1.0
+                s = 0.7 + random.random()*0.3
+                v = 0.6 + random.random()*0.4
+                r,g,b = colorsys.hsv_to_rgb(h,s,v)
+                palette.append((int(r*255), int(g*255), int(b*255)))
+
+        # Style influences
+        if style == "Cyberpunk":
+            palette = [(255,0,110), (0,255,255), (255,255,0), (131,56,236), (0,0,0)]
+        elif style == "Anime":
+            # Pastel
+            palette = [(255,183,197), (173,216,230), (255,218,185), (221,160,221), (152,251,152)]
+        elif style == "Oil Painting":
+            palette = [(139,69,19), (160,82,45), (205,133,63), (222,184,135), (101,67,33)]
+
+        # Generate beautiful gradient background
+        for y in range(height):
+            t = y / height
+            # Pick two colors based on y
+            idx = int(t * (len(palette)-1))
+            c1 = palette[min(idx, len(palette)-1)]
+            c2 = palette[min(idx+1, len(palette)-1)]
+            local_t = (t * (len(palette)-1)) % 1.0
+            r = int(c1[0]*(1-local_t) + c2[0]*local_t)
+            g = int(c1[1]*(1-local_t) + c2[1]*local_t)
+            b = int(c1[2]*(1-local_t) + c2[2]*local_t)
+            draw.line([(0,y), (width,y)], fill=(r,g,b,255))
+
+        # Add procedural details based on prompt
+        # Clouds / noise
+        for _ in range(30):
+            x = random.randint(0, width)
+            y = random.randint(0, height)
+            size = random.randint(20, max(30, width//4))
+            alpha = random.randint(20, 80)
+            c = random.choice(palette)
+            # Soft circle
+            for i in range(3):
+                draw.ellipse([x-size//2-i, y-size//2-i, x+size//2+i, y+size//2+i], fill=(c[0], c[1], c[2], alpha//(i+1)), outline=None)
+
+        # Add prompt-specific shapes
+        if "mountain" in prompt_lower or "sunset" in prompt_lower:
+            # Draw mountain silhouette
+            points = [(0, height)]
+            for x in range(0, width+1, width//10):
+                y = height - random.randint(int(height*0.3), int(height*0.7)) - int(math.sin(x/width*math.pi)*height*0.1)
+                points.append((x,y))
+            points.append((width, height))
+            draw.polygon(points, fill=(20,20,20,180))
+
+        if "stars" in prompt_lower or "space" in prompt_lower or "night" in prompt_lower:
+            for _ in range(150):
+                x = random.randint(0, width)
+                y = random.randint(0, height)
+                brightness = random.randint(150, 255)
+                size = random.randint(1, 3)
+                draw.ellipse([x,y,x+size,y+size], fill=(brightness, brightness, brightness, 200))
+
+        # No watermark - clean image for Tier 5
+        return img
+
+    def ai_fill_selection_with_prompt(self):
+        if self._last_wand_mask is None:
+            messagebox.showinfo("AI Fill", "Make a selection first with Wand or Lasso! Then AI Fill will generate inside it.")
+            return
+        # Ask for prompt
+        prompt = tk.simpledialog.askstring("AI Fill Selection", "What to generate inside selection?\nExample: 'beautiful flowers, photorealistic'")
+        if not prompt:
+            return
+        self.ai_prompt.set(prompt)
+        try:
+            self.push_undo(f"AI Fill: {prompt[:20]}")
+            # Generate image
+            w,h = self.layers[self.active_layer_idx].image.size
+            gen_img = self.ai_generate_from_prompt(prompt, w, h, self.ai_style.get(), "Auto (best available)", None)
+            # Composite only inside selection mask
+            layer_img = self.layers[self.active_layer_idx].image.convert("RGBA")
+            mask = self._last_wand_mask
+            if mask.size != layer_img.size:
+                mask = mask.resize(layer_img.size, Image.LANCZOS)
+            # Feather mask for smooth blend
+            mask_feathered = mask.filter(ImageFilter.GaussianBlur(radius=3))
+            result = Image.composite(gen_img, layer_img, mask_feathered)
+            self.layers[self.active_layer_idx].image = result
+            self.display_composite()
+            self.status_var.set(f"✨ AI Filled selection with: {prompt}")
+        except Exception as e:
+            messagebox.showerror("AI Fill Error", str(e))
+
+    def ai_replace_bg_with_prompt(self):
+        prompt = tk.simpledialog.askstring("AI Replace Background", "Describe new background:\nExample: 'cyberpunk city at night, neon lights, raining'")
+        if not prompt:
+            return
+        if not self.layers:
+            return
+        try:
+            self.push_undo(f"AI BG Replace: {prompt[:20]}")
+            # First remove background if rembg available
+            layer = self.layers[self.active_layer_idx]
+            img = layer.image.convert("RGBA")
+            if REMBG_AVAILABLE:
+                try:
+                    img_no_bg = rembg_remove(img)
+                except:
+                    img_no_bg = img
+            else:
+                img_no_bg = img
+            # Generate new BG
+            w,h = img.size
+            bg_img = self.ai_generate_from_prompt(prompt, w, h, self.ai_style.get(), "Auto (best available)", None)
+            # Composite foreground over new BG
+            # img_no_bg has alpha for foreground
+            result = Image.alpha_composite(bg_img.convert("RGBA"), img_no_bg.convert("RGBA"))
+            layer.image = result
+            self.display_composite()
+            self.status_var.set(f"✨ AI Background replaced: {prompt}")
+        except Exception as e:
+            messagebox.showerror("AI BG Replace Error", str(e))
+
     def ai_remove_background(self):
+
         if not self.layers:
             return
         if not REMBG_AVAILABLE:
@@ -1262,6 +3002,8 @@ class ImageEditor:
         img = self.layers[self.active_layer_idx].image
         w,h = img.size
         self.layers[self.active_layer_idx].image = img.resize((w*2, h*2), Image.LANCZOS)
+        if self.layers[self.active_layer_idx].mask is not None:
+            self.layers[self.active_layer_idx].mask = self.layers[self.active_layer_idx].mask.resize((w*2, h*2), Image.LANCZOS)
         self.display_composite()
         self.update_resize_entries()
 
