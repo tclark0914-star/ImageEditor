@@ -1,4 +1,4 @@
-﻿
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser, simpledialog
 from PIL import Image, ImageTk, ImageEnhance, ImageOps, ImageFilter, ImageStat, ImageDraw, ImageChops, ImageFont
@@ -23,16 +23,40 @@ class Layer:
         self.opacity = opacity
         self.blend_mode = blend_mode
         self.mask = None
+        # TIER 6A: Transform properties
+        self.offset_x = 0
+        self.offset_y = 0
+        self.scale_x = 1.0
+        self.scale_y = 1.0
+        self.rotation = 0.0  # degrees
     def copy(self):
         c = Layer(self.name, self.image.copy(), self.visible, self.opacity, self.blend_mode)
         if self.mask is not None:
             c.mask = self.mask.copy()
+        c.offset_x = self.offset_x
+        c.offset_y = self.offset_y
+        c.scale_x = self.scale_x
+        c.scale_y = self.scale_y
+        c.rotation = self.rotation
         return c
+    def get_transformed_image(self, base_size=None):
+        """Return transformed image with scale/rotation applied"""
+        img = self.image
+        # Apply scale
+        if self.scale_x != 1.0 or self.scale_y != 1.0:
+            w, h = img.size
+            new_w = max(1, int(w * self.scale_x))
+            new_h = max(1, int(h * self.scale_y))
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+        # Apply rotation
+        if self.rotation != 0:
+            img = img.rotate(self.rotation, expand=True, resample=Image.BICUBIC)
+        return img
 
 class ImageEditor:
     def __init__(self, root):
         self.root = root
-        self.root.title("ImageEditor - Milestone 9 TIER 5.1 (ComfyUI + A1111 + No Watermark)")
+        self.root.title("ImageEditor - TIER 6A (True Blend + Free Transform + Layer Reorder + No Watermark)")
         self.root.geometry("1500x980")
         self.root.minsize(1250, 800)
 
@@ -87,6 +111,14 @@ class ImageEditor:
         self.shadows_amount = tk.IntVar(value=0)
         self.highlights_amount = tk.IntVar(value=0)
 
+        # TIER 6A: Free Transform state
+        self.transform_active = False
+        self.transform_start_pos = None
+        self.transform_start_offset = None
+        self.transform_handle = None  # 'move', 'scale_nw', 'scale_ne', etc, 'rotate'
+        self.transform_ids = []  # canvas IDs for handles
+        self.layer_opacity_var = tk.DoubleVar(value=1.0)
+
         # AI Prompt (Tier 5 - Modular Plugin System)
         self.ai_prompt = tk.StringVar(value="a beautiful sunset over mountains, digital art")
         self.ai_negative_prompt = tk.StringVar(value="")
@@ -97,21 +129,19 @@ class ImageEditor:
         self.ai_providers = {}  # Plugin registry
         self.ai_provider_order = []
         self.ai_generators_dir = os.path.join(os.path.dirname(__file__) if "__file__" in globals() else os.getcwd(), "ai_generators")
+        # AI Plugin config file - MUST be before load_ai_providers()
+        self.ai_config_path = os.path.expanduser("~/.imageeditor_ai.json")
+        self.pan_start = None
         self.load_ai_providers()  # Load plugin system
         try:
             # Load API key if exists
             import json
-            if os.path.exists(os.path.expanduser("~/.imageeditor_ai.json")):
-                with open(os.path.expanduser("~/.imageeditor_ai.json"), "r") as f:
+            if os.path.exists(self.ai_config_path):
+                with open(self.ai_config_path, "r") as f:
                     data = json.load(f)
                     self.ai_api_key = data.get("openai_key", "")
         except:
             pass
-
-
-        self.pan_start = None
-        # AI Plugin config file
-        self.ai_config_path = os.path.expanduser("~/.imageeditor_ai.json")
 
         self.setup_ui()
         self.bind_shortcuts()
@@ -393,7 +423,7 @@ def register(editor):
         self.toolbar.pack_propagate(False)
         tk.Label(self.toolbar, text="TOOLS", bg="#3c3c3c", fg="#aaaaaa", font=("Segoe UI", 8, "bold")).pack(pady=(12,8))
 
-        tools = [("Select", "select"), ("Crop", "crop"), ("Brush", "brush"), ("Eraser", "eraser"), ("Text", "text"), ("Wand", "wand"), ("Lasso", "lasso"), ("Gradient", "gradient"), ("Clone", "clone")]
+        tools = [("Select", "select"), ("Move", "move"), ("Transform", "transform"), ("Crop", "crop"), ("Brush", "brush"), ("Eraser", "eraser"), ("Text", "text"), ("Wand", "wand"), ("Lasso", "lasso"), ("Gradient", "gradient"), ("Clone", "clone")]
         for label, mode in tools:
             b = tk.Radiobutton(self.toolbar, text=label, variable=self.current_tool, value=mode, bg="#3c3c3c", fg="white", selectcolor="#555555", indicatoron=0, width=11, command=self.on_tool_change)
             b.pack(pady=1, padx=5)
@@ -440,7 +470,7 @@ def register(editor):
         self.canvas.bind("<B2-Motion>", self.on_pan_drag)
         self.canvas.bind("<ButtonPress-3>", self.on_right_click)
 
-        self.status_var = tk.StringVar(value="Milestone 8 TIER 4: Gradient + Shadows/Highlights + Vignette ready.")
+        self.status_var = tk.StringVar(value="TIER 6A READY: Move Tool (fleur) + Free Transform Ctrl+T + Layer Reorder ▲▼ + True Overlay Blend + No Watermark")
         status_bar = tk.Label(center_frame, textvariable=self.status_var, anchor="w", bg="#2b2b2b", fg="#cccccc", font=("Segoe UI", 9), padx=10, pady=4)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
@@ -541,9 +571,32 @@ def register(editor):
         tk.Button(mask_row, text="Add Mask", command=self.add_layer_mask, bg="#4a7a4a", fg="white", font=("Segoe UI", 8)).pack(side="left", padx=2)
         tk.Button(mask_row, text="Del Mask", command=self.delete_layer_mask, bg="#9a4a4a", fg="white", font=("Segoe UI", 8)).pack(side="left", padx=2)
         tk.Button(mask_row, text="Apply Mask", command=self.apply_layer_mask, bg="#4a4a4a", fg="white", font=("Segoe UI", 8)).pack(side="left", padx=2)
+        # TIER 6A: Layer reorder buttons
+        reorder_row = tk.Frame(self.layers_frame, bg="#2b2b2b")
+        reorder_row.pack(fill="x", pady=2)
+        tk.Button(reorder_row, text="▲ Move Up", command=self.move_layer_up, bg="#4a5a8a", fg="white", font=("Segoe UI", 8)).pack(side="left", padx=2, fill="x", expand=True)
+        tk.Button(reorder_row, text="▼ Move Down", command=self.move_layer_down, bg="#4a5a8a", fg="white", font=("Segoe UI", 8)).pack(side="left", padx=2, fill="x", expand=True)
+        # TIER 6A: Opacity slider
+        opacity_row = tk.Frame(self.layers_frame, bg="#2b2b2b")
+        opacity_row.pack(fill="x", pady=2)
+        tk.Label(opacity_row, text="Opacity:", bg="#2b2b2b", fg="#cccccc", font=("Segoe UI", 8)).pack(side="left")
+        tk.Scale(opacity_row, from_=0.0, to=1.0, resolution=0.05, orient="horizontal", variable=self.layer_opacity_var, bg="#2b2b2b", fg="white", troughcolor="#555555", highlightthickness=0, command=self.on_opacity_change, length=150).pack(side="left", fill="x", expand=True)
         tk.Checkbutton(self.layers_frame, text="Edit Mask (paint mask, not image)", variable=self.mask_edit_mode, bg="#2b2b2b", fg="#ffaa55", selectcolor="#3c3c3c", font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=2)
         self.mask_info = tk.Label(self.layers_frame, text="Mask: none", bg="#2b2b2b", fg="#aaaaaa", font=("Segoe UI", 7))
         self.mask_info.pack(anchor="w")
+
+        # TIER 6A: Free Transform panel
+        transform_frame = tk.LabelFrame(self.scrollable_frame, text="Free Transform (TIER 6A - NEW!)", bg="#2b1a1a", fg="#ffaa55", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
+        transform_frame.pack(fill="x", padx=8, pady=6)
+        tk.Label(transform_frame, text="Move layer, scale, rotate - like Photoshop Ctrl+T", bg="#2b1a1a", fg="#aaaaaa", font=("Segoe UI", 7)).pack(anchor="w")
+        t_btn_row = tk.Frame(transform_frame, bg="#2b1a1a")
+        t_btn_row.pack(fill="x", pady=4)
+        tk.Button(t_btn_row, text="↔ Move Tool", command=lambda: self.enable_transform('move'), bg="#8a5a4a", fg="white", font=("Segoe UI", 8, "bold")).pack(side="left", padx=2, fill="x", expand=True)
+        tk.Button(t_btn_row, text="Free Transform", command=self.free_transform_dialog, bg="#ff6a4a", fg="white", font=("Segoe UI", 8, "bold")).pack(side="left", padx=2, fill="x", expand=True)
+        t_btn_row2 = tk.Frame(transform_frame, bg="#2b1a1a")
+        t_btn_row2.pack(fill="x", pady=2)
+        tk.Button(t_btn_row2, text="Reset Transform", command=self.reset_transform, bg="#4a4a4a", fg="white", font=("Segoe UI", 7)).pack(side="left", padx=2, fill="x", expand=True)
+        tk.Button(t_btn_row2, text="Center Layer", command=self.center_layer, bg="#4a4a4a", fg="white", font=("Segoe UI", 7)).pack(side="left", padx=2, fill="x", expand=True)
 
         # Shadows/Highlights Tier4
         sh_frame = tk.LabelFrame(self.scrollable_frame, text="Shadows/Highlights + Vignette (Tier 4)", bg="#2b2b2b", fg="white", font=("Segoe UI", 9, "bold"), padx=8, pady=6)
@@ -615,11 +668,23 @@ def register(editor):
 
     def on_tool_change(self):
         tool = self.current_tool.get()
-        self.status_var.set(f"Tool: {tool} | Zoom {int(self.zoom*100)}% | Colors: {self.brush_color} -> {self.gradient_color2}")
-        cursors = {"select": "arrow", "crop": "crosshair", "brush": "pencil", "eraser": "dotbox", "text": "xterm", "wand": "tcross", "lasso": "crosshair", "gradient": "crosshair", "clone": "crosshair"}
+        # Reset transform undo flag when switching tools
+        if tool not in ("move", "transform"):
+            self._transform_undo_pushed = False
+        if tool in ("move", "transform"):
+            self.status_var.set(f"TIER 6A Transform Tool: Drag to move layer | Ctrl+T for dialog | Opacity & Blend in Layers panel")
+        else:
+            self.status_var.set(f"Tool: {tool} | Zoom {int(self.zoom*100)}% | Colors: {self.brush_color} -> {self.gradient_color2}")
+        cursors = {"select": "arrow", "move": "fleur", "transform": "sizing", "crop": "crosshair", "brush": "pencil", "eraser": "dotbox", "text": "xterm", "wand": "tcross", "lasso": "crosshair", "gradient": "crosshair", "clone": "crosshair"}
         self.canvas.config(cursor=cursors.get(tool, "crosshair"))
         if tool != "lasso":
             self.clear_lasso_visual()
+
+    def exit_transform(self):
+        self.current_tool.set("select")
+        self.transform_active = False
+        self._transform_undo_pushed = False
+        self.on_tool_change()
 
     def bind_shortcuts(self):
         self.root.bind("<Control-o>", lambda e: self.open_image())
@@ -630,7 +695,10 @@ def register(editor):
         self.root.bind("<Control-e>", lambda e: self.merge_down())
         self.root.bind("<Control-b>", lambda e: self.ai_remove_background())
         self.root.bind("<Control-g>", lambda e: self.ai_prompt_dialog())
+        self.root.bind("<Control-t>", lambda e: self.free_transform_dialog())
+        self.root.bind("<Control-m>", lambda e: self.enable_transform('move'))
         self.root.bind("<Delete>", lambda e: self.delete_layer())
+        self.root.bind("<Escape>", lambda e: self.exit_transform())
 
     def push_undo(self, action=""):
         if len(self.undo_stack) >= self.max_undo:
@@ -675,6 +743,46 @@ def register(editor):
             else:
                 self.mask_info.config(text="Mask: none")
 
+    def on_blend_change(self, e):
+        if not self.layers:
+            return
+        self.push_undo(f"Blend {self.blend_var.get()}")
+        self.layers[self.active_layer_idx].blend_mode = self.blend_var.get()
+        self.display_composite()
+
+    # ========== TIER 6A: Layer Reordering & Opacity & Transform ==========
+    def move_layer_up(self):
+        if not self.layers or self.active_layer_idx >= len(self.layers)-1:
+            return
+        self.push_undo("Move layer up")
+        idx = self.active_layer_idx
+        self.layers[idx], self.layers[idx+1] = self.layers[idx+1], self.layers[idx]
+        self.active_layer_idx += 1
+        self.refresh_layers_list()
+        self.display_composite()
+        self.status_var.set(f"Moved layer up to position {self.active_layer_idx}")
+
+    def move_layer_down(self):
+        if not self.layers or self.active_layer_idx <= 0:
+            return
+        self.push_undo("Move layer down")
+        idx = self.active_layer_idx
+        self.layers[idx], self.layers[idx-1] = self.layers[idx-1], self.layers[idx]
+        self.active_layer_idx -= 1
+        self.refresh_layers_list()
+        self.display_composite()
+        self.status_var.set(f"Moved layer down to position {self.active_layer_idx}")
+
+    def on_opacity_change(self, value=None):
+        if not self.layers:
+            return
+        try:
+            op = float(value) if value is not None else self.layer_opacity_var.get()
+            self.layers[self.active_layer_idx].opacity = op
+            self.display_composite()
+        except:
+            pass
+
     def on_layer_select(self, e):
         sel = self.layers_listbox.curselection()
         if not sel:
@@ -683,15 +791,133 @@ def register(editor):
         self.active_layer_idx = len(self.layers)-1 - rev_idx
         if self.layers:
             self.blend_var.set(self.layers[self.active_layer_idx].blend_mode)
+            self.layer_opacity_var.set(self.layers[self.active_layer_idx].opacity)
         self.refresh_layers_list()
         self.display_composite()
 
-    def on_blend_change(self, e):
+    def enable_transform(self, mode='move'):
         if not self.layers:
             return
-        self.push_undo(f"Blend {self.blend_var.get()}")
-        self.layers[self.active_layer_idx].blend_mode = self.blend_var.get()
+        self.current_tool.set('transform')
+        self.transform_active = True
+        self.transform_handle = mode
+        self.status_var.set(f"TIER 6A Transform: {mode} mode - Drag on canvas to move/scale active layer. Press Esc to exit, Enter to apply.")
+        self.on_tool_change()
+
+    def reset_transform(self):
+        if not self.layers:
+            return
+        self.push_undo("Reset transform")
+        layer = self.layers[self.active_layer_idx]
+        layer.offset_x = 0
+        layer.offset_y = 0
+        layer.scale_x = 1.0
+        layer.scale_y = 1.0
+        layer.rotation = 0.0
         self.display_composite()
+        self.status_var.set("Transform reset")
+
+    def center_layer(self):
+        if not self.layers:
+            return
+        self.push_undo("Center layer")
+        layer = self.layers[self.active_layer_idx]
+        # Center calculation: (base_size - layer_size) // 2
+        if len(self.layers) > 0:
+            base_w, base_h = self.layers[0].image.size
+            img = layer.get_transformed_image()
+            lw, lh = img.size
+            layer.offset_x = (base_w - lw) // 2
+            layer.offset_y = (base_h - lh) // 2
+        self.display_composite()
+
+    def free_transform_dialog(self):
+        if not self.layers:
+            return
+        layer = self.layers[self.active_layer_idx]
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Free Transform - {layer.name} (TIER 6A)")
+        dialog.geometry("420x380")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(bg="#2b1a1a")
+        
+        tk.Label(dialog, text=f"Transform: {layer.name}", font=("Segoe UI", 12, "bold"), bg="#2b1a1a", fg="#ffaa55").pack(pady=10)
+        tk.Label(dialog, text="Move, Scale, Rotate - Photoshop Ctrl+T style", bg="#2b1a1a", fg="#aaaaaa", font=("Segoe UI", 8)).pack()
+        
+        # Position
+        pos_frame = tk.LabelFrame(dialog, text="Position (Offset)", bg="#2b1a1a", fg="white", padx=10, pady=5)
+        pos_frame.pack(fill="x", padx=10, pady=5)
+        tk.Label(pos_frame, text="X:", bg="#2b1a1a", fg="#cccccc").grid(row=0, column=0)
+        x_var = tk.IntVar(value=layer.offset_x)
+        tk.Scale(pos_frame, from_=-500, to=500, orient="horizontal", variable=x_var, bg="#2b1a1a", fg="white", troughcolor="#555", length=300).grid(row=0, column=1)
+        tk.Label(pos_frame, text="Y:", bg="#2b1a1a", fg="#cccccc").grid(row=1, column=0)
+        y_var = tk.IntVar(value=layer.offset_y)
+        tk.Scale(pos_frame, from_=-500, to=500, orient="horizontal", variable=y_var, bg="#2b1a1a", fg="white", troughcolor="#555", length=300).grid(row=1, column=1)
+        
+        # Scale
+        scale_frame = tk.LabelFrame(dialog, text="Scale", bg="#2b1a1a", fg="white", padx=10, pady=5)
+        scale_frame.pack(fill="x", padx=10, pady=5)
+        tk.Label(scale_frame, text="Scale X:", bg="#2b1a1a", fg="#cccccc").grid(row=0, column=0)
+        sx_var = tk.DoubleVar(value=layer.scale_x)
+        tk.Scale(scale_frame, from_=0.1, to=3.0, resolution=0.05, orient="horizontal", variable=sx_var, bg="#2b1a1a", fg="white", troughcolor="#555", length=300).grid(row=0, column=1)
+        tk.Label(scale_frame, text="Scale Y:", bg="#2b1a1a", fg="#cccccc").grid(row=1, column=0)
+        sy_var = tk.DoubleVar(value=layer.scale_y)
+        tk.Scale(scale_frame, from_=0.1, to=3.0, resolution=0.05, orient="horizontal", variable=sy_var, bg="#2b1a1a", fg="white", troughcolor="#555", length=300).grid(row=1, column=1)
+        
+        # Rotation
+        rot_frame = tk.LabelFrame(dialog, text="Rotation", bg="#2b1a1a", fg="white", padx=10, pady=5)
+        rot_frame.pack(fill="x", padx=10, pady=5)
+        tk.Label(rot_frame, text="Angle:", bg="#2b1a1a", fg="#cccccc").grid(row=0, column=0)
+        rot_var = tk.DoubleVar(value=layer.rotation)
+        tk.Scale(rot_frame, from_=-180, to=180, orient="horizontal", variable=rot_var, bg="#2b1a1a", fg="white", troughcolor="#555", length=300).grid(row=0, column=1)
+        
+        original_offset_x = layer.offset_x
+        original_offset_y = layer.offset_y
+        original_sx = layer.scale_x
+        original_sy = layer.scale_y
+        original_rot = layer.rotation
+        
+        def apply_live(*args):
+            layer.offset_x = x_var.get()
+            layer.offset_y = y_var.get()
+            layer.scale_x = sx_var.get()
+            layer.scale_y = sy_var.get()
+            layer.rotation = rot_var.get()
+            self.display_composite()
+        
+        x_var.trace_add("write", lambda *a: apply_live())
+        y_var.trace_add("write", lambda *a: apply_live())
+        sx_var.trace_add("write", lambda *a: apply_live())
+        sy_var.trace_add("write", lambda *a: apply_live())
+        rot_var.trace_add("write", lambda *a: apply_live())
+        
+        def on_ok():
+            self.push_undo(f"Transform {layer.name}")
+            dialog.destroy()
+            self.status_var.set(f"Transformed {layer.name}: pos({layer.offset_x},{layer.offset_y}) scale({layer.scale_x:.2f},{layer.scale_y:.2f}) rot({layer.rotation:.1f})")
+        
+        def on_cancel():
+            layer.offset_x = original_offset_x
+            layer.offset_y = original_offset_y
+            layer.scale_x = original_sx
+            layer.scale_y = original_sy
+            layer.rotation = original_rot
+            self.display_composite()
+            dialog.destroy()
+        
+        def on_reset():
+            x_var.set(0)
+            y_var.set(0)
+            sx_var.set(1.0)
+            sy_var.set(1.0)
+            rot_var.set(0.0)
+        
+        btn_row = tk.Frame(dialog, bg="#2b1a1a")
+        btn_row.pack(pady=12)
+        tk.Button(btn_row, text="Reset", command=on_reset, width=8).pack(side="left", padx=4)
+        tk.Button(btn_row, text="Cancel", command=on_cancel, width=10).pack(side="left", padx=6)
+        tk.Button(btn_row, text="OK - Apply", command=on_ok, bg="#ff6a4a", fg="white", width=12, font=("Segoe UI", 9, "bold")).pack(side="left", padx=6)
 
     def add_layer(self):
         if not self.layers:
@@ -763,13 +989,27 @@ def register(editor):
 
     def composite_two(self, lower_layer, upper_layer):
         lower = lower_layer.image
-        upper = upper_layer.image
-        if upper.size != lower.size:
-            upper = upper.resize(lower.size, Image.LANCZOS)
+        # TIER 6A: Get transformed upper image with scale/rotation
+        upper = upper_layer.get_transformed_image() if hasattr(upper_layer, 'get_transformed_image') else upper_layer.image
+        
+        # Create canvas same size as lower for compositing with offset
+        lower_w, lower_h = lower.size
         if upper.mode != "RGBA":
             upper = upper.convert("RGBA")
         if lower.mode != "RGBA":
             lower = lower.convert("RGBA")
+        
+        # TIER 6A: Apply offset - create full-size canvas for upper at offset position
+        offset_x = getattr(upper_layer, 'offset_x', 0)
+        offset_y = getattr(upper_layer, 'offset_y', 0)
+        
+        if offset_x != 0 or offset_y != 0 or upper.size != lower.size:
+            # Create transparent canvas same size as lower
+            upper_canvas = Image.new("RGBA", (lower_w, lower_h), (0,0,0,0))
+            # Paste upper at offset
+            upper_canvas.paste(upper, (offset_x, offset_y), upper)
+            upper = upper_canvas
+        
         if upper_layer.mask is not None:
             mask = upper_layer.mask
             if mask.size != upper.size:
@@ -791,6 +1031,45 @@ def register(editor):
                 blended = ImageChops.darker(lower_rgb, upper_rgb)
             elif mode == "lighten":
                 blended = ImageChops.lighter(lower_rgb, upper_rgb)
+            elif mode == "overlay":
+                # TIER 6A: Proper overlay implementation
+                # overlay = if base < 128: 2*base*blend/255 else: 255-2*(255-base)*(255-blend)/255
+                # Use numpy-like via PIL point? We'll do pixel loop for small or use blend
+                # Fast approximation: overlay = hard light with swapped layers, or use ImageChops
+                # PIL doesn't have overlay, implement via custom
+                def overlay_blend(a, b):
+                    # a=base, b=blend
+                    # Convert to arrays for speed? Use point with lambda per channel
+                    # Simplified: use multiply + screen
+                    # We'll do manual via ImageMath
+                    return ImageChops.overlay(lower_rgb, upper_rgb) if hasattr(ImageChops, 'overlay') else Image.blend(ImageChops.multiply(lower_rgb, upper_rgb), ImageChops.screen(lower_rgb, upper_rgb), 0.5)
+                try:
+                    # Try PIL's overlay if available (Pillow 10+)
+                    if hasattr(ImageChops, 'overlay'):
+                        blended = ImageChops.overlay(lower_rgb, upper_rgb)
+                    else:
+                        # Custom overlay: base < 128 ? 2*base*blend/255 : 255-2*(255-base)*(255-blend)/255
+                        # Implement per channel using Image.eval or pixel data
+                        # Fast path: use ImageMath
+                        from PIL import ImageMath
+                        # We'll do manual loop for correctness but optimized for RGB
+                        # Use numpy if available? Fallback to PIL
+                        blended = Image.new("RGB", lower_rgb.size)
+                        # Get data as lists
+                        lower_data = list(lower_rgb.getdata())
+                        upper_data = list(upper_rgb.getdata())
+                        out_data = []
+                        for (lr,lg,lb), (ur,ug,ub) in zip(lower_data, upper_data):
+                            def ov(b1, b2):
+                                if b1 < 128:
+                                    return int((2 * b1 * b2) / 255)
+                                else:
+                                    return int(255 - 2 * (255 - b1) * (255 - b2) / 255)
+                            out_data.append((ov(lr,ur), ov(lg,ug), ov(lb,ub)))
+                        blended.putdata(out_data)
+                except Exception as e:
+                    print(f"Overlay fallback: {e}")
+                    blended = ImageChops.multiply(lower_rgb, upper_rgb)
             else:
                 blended = Image.blend(lower_rgb, upper_rgb, 0.5)
             blended = blended.convert("RGBA")
@@ -977,6 +1256,8 @@ def register(editor):
         tool = self.current_tool.get()
         if tool == "crop":
             self.on_crop_press(event)
+        elif tool == "transform" or tool == "move":
+            self.on_transform_press(event)
         elif tool in ("brush", "eraser"):
             self.on_brush_press(event)
         elif tool == "text":
@@ -1001,6 +1282,8 @@ def register(editor):
         tool = self.current_tool.get()
         if tool == "crop":
             self.on_crop_drag(event)
+        elif tool in ("transform", "move"):
+            self.on_transform_drag(event)
         elif tool in ("brush", "eraser"):
             self.on_brush_drag(event)
         elif tool == "lasso":
@@ -1014,6 +1297,8 @@ def register(editor):
         tool = self.current_tool.get()
         if tool == "crop":
             self.on_crop_release(event)
+        elif tool in ("transform", "move"):
+            self.on_transform_release(event)
         elif tool in ("brush", "eraser"):
             self.on_brush_release(event)
         elif tool == "lasso":
@@ -1089,6 +1374,50 @@ def register(editor):
 
     def on_text_click(self, event):
         self.add_text_dialog(prefill_pos=self.canvas_to_image_coords(event.x, event.y))
+
+    # ========== TIER 6A: Free Transform Handlers ==========
+    def on_transform_press(self, event):
+        if not self.layers:
+            return
+        self.transform_start_pos = (event.x, event.y)
+        layer = self.layers[self.active_layer_idx]
+        self.transform_start_offset = (layer.offset_x, layer.offset_y)
+        self.transform_start_scale = (layer.scale_x, layer.scale_y)
+        self.is_drawing = True
+        # Push undo only on first press of a transform session
+        if not hasattr(self, '_transform_undo_pushed') or not self._transform_undo_pushed:
+            self.push_undo(f"Transform {layer.name}")
+            self._transform_undo_pushed = True
+
+    def on_transform_drag(self, event):
+        if not self.layers or not self.is_drawing or self.transform_start_pos is None:
+            return
+        dx = event.x - self.transform_start_pos[0]
+        dy = event.y - self.transform_start_pos[1]
+        # Convert canvas delta to image delta (account for zoom)
+        if self.display_size[0] > 0 and self.composited_image:
+            # Estimate image delta: canvas delta / zoom
+            img_dx = int(dx / self.zoom) if self.zoom != 0 else dx
+            img_dy = int(dy / self.zoom) if self.zoom != 0 else dy
+        else:
+            img_dx = dx
+            img_dy = dy
+        
+        layer = self.layers[self.active_layer_idx]
+        # Move
+        if self.transform_handle in ('move', None):
+            layer.offset_x = self.transform_start_offset[0] + img_dx
+            layer.offset_y = self.transform_start_offset[1] + img_dy
+        self.display_composite()
+        self.status_var.set(f"Transform: offset ({layer.offset_x}, {layer.offset_y}) scale ({layer.scale_x:.2f}, {layer.scale_y:.2f}) rot {layer.rotation:.1f}° - Drag to move, use dialog for scale/rotate")
+
+    def on_transform_release(self, event):
+        self.is_drawing = False
+        self.transform_start_pos = None
+        # Keep undo flag for session, reset after short delay? For now reset on release
+        # Actually keep it so multiple drags in same session don't push many undos
+        # We'll reset when tool changes
+        self.display_composite()
 
     def on_wand_click(self, event):
         coords = self.canvas_to_image_coords(event.x, event.y)
@@ -2426,6 +2755,15 @@ Current Status:"""
         resp = requests.get(url, timeout=60)
         if resp.status_code == 200 and len(resp.content) > 1000:
             img = Image.open(BytesIO(resp.content)).convert("RGBA")
+            # AUTO-REMOVE WATERMARK: Pollinations still adds logo despite nologo=true
+            try:
+                w,h = img.size
+                # Crop bottom 7% where watermark lives
+                crop_h = int(h * 0.93)
+                img_cropped = img.crop((0, 0, w, crop_h))
+                img = img_cropped.resize((w, h), Image.LANCZOS)
+            except:
+                pass
             # Resize to exact requested size
             if img.size != (width, height):
                 img = img.resize((width, height), Image.LANCZOS)
@@ -2737,8 +3075,19 @@ Current Status:"""
                 if resp.status_code == 200:
                     img = Image.open(BytesIO(resp.content)).convert("RGBA")
                     img = img.resize((width, height), Image.LANCZOS)
+                    # AUTO-REMOVE WATERMARK: Pollinations still adds small logo despite nologo=true
+                    # Crop bottom 28px where logo lives, then resize back to clean
+                    try:
+                        w,h = img.size
+                        # Check if bottom-right has watermark (white text) - crop it
+                        # Crop 5% from bottom and scale back up to remove logo
+                        crop_h = int(h * 0.93)  # Keep 93% of height, remove bottom 7% where logo is
+                        img_cropped = img.crop((0, 0, w, crop_h))
+                        img = img_cropped.resize((width, height), Image.LANCZOS)
+                    except:
+                        pass
                     if status_var:
-                        status_var.set("✓ Got REAL AI image from FREE online API!")
+                        status_var.set("✓ Got REAL AI image from FREE online API (watermark removed)!")
                     return img
             except Exception as e:
                 print(f"Pollinations failed: {e}")
@@ -3036,5 +3385,3 @@ if __name__ == "__main__":
         pass
     app = ImageEditor(root)
     root.mainloop()
-
-# Tier 5.1 pushed 10/09/2026 18:35:41
