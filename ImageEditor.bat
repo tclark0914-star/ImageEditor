@@ -1,18 +1,25 @@
 @echo off
-REM ImageEditor Launcher - double-click this file to run the editor
-REM No PowerShell needed
-
-REM Try pythonw (no console window)
-REM Update these paths if your Python is in a different location
-
-set PYTHONW=C:\Users\tc06h\AppData\Local\Programs\Python\Python312\pythonw.exe
-set SCRIPT=C:\Users\tc06h\Documents\ImageEditor\main.py
-
-REM Check if pythonw exists, fallback to python
-if exist "%PYTHONW%" (
-    start "" "%PYTHONW%" "%SCRIPT%"
-) else (
-    echo pythonw not found, trying python...
-    python "%SCRIPT%"
+title ImageEditor v8.0 Tier 8
+echo ========================================
+echo   ImageEditor v8.0 Tier 8 ALL - 5626 lines
+echo   SAFE - No SmartScreen!
+echo ========================================
+python --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo ERROR: Python not found!
     pause
+    exit /b
 )
+if not exist main.py (
+    echo ERROR: main.py not found!
+    pause
+    exit /b
+)
+echo Starting...
+python main.py
+if %errorlevel% neq 0 (
+    echo Installing requirements...
+    pip install -r requirements.txt
+    python main.py
+)
+pause
