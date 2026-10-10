@@ -1,6 +1,11 @@
 Pillow>=10.0.0
 rembg>=2.0.50
 requests>=2.31.0
+psd-tools>=1.9.30
+numpy>=1.24.0
+# Tier 7 Real PSD + Layer Styles
+# Tier 8 ALL: Filters + Liquify + Smart Objects + Timeline + Adjustment Layers
+# New: imageio for GIF export (optional but recommended)
 # Optional - for local AI:
 # diffusers>=0.21.0
 # transformers>=4.30.0
