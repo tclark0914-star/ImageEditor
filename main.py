@@ -2488,6 +2488,7 @@ def register(editor):
             upper = group_base
 
         lower_w, lower_h = lower.size
+        upper = upper.copy()  # never edit the layer's own pixels while drawing
         if upper.mode != "RGBA":
             upper = upper.convert("RGBA")
         if lower.mode != "RGBA":
