@@ -8,12 +8,23 @@ import hashlib
 import random
 import io
 
-try:
-    from rembg import remove as rembg_remove
-    REMBG_AVAILABLE = True
-except ImportError:
-    REMBG_AVAILABLE = False
-    rembg_remove = None
+# FIX 1: Lazy rembg import - avoids SystemExit when onnxruntime missing
+REMBG_AVAILABLE = False
+rembg_remove = None
+def _try_import_rembg():
+    global REMBG_AVAILABLE, rembg_remove
+    if REMBG_AVAILABLE and rembg_remove is not None:
+        return True
+    try:
+        from rembg import remove as _rembg_remove
+        REMBG_AVAILABLE = True
+        rembg_remove = _rembg_remove
+        return True
+    except BaseException as e:
+        REMBG_AVAILABLE = False
+        rembg_remove = None
+        print(f"rembg not available: {e}")
+        return False
 
 class Layer:
     def __init__(self, name, image, visible=True, opacity=1.0, blend_mode="normal"):
@@ -335,6 +346,7 @@ class ImageEditor:
         self.ai_providers = {}  # Plugin registry
         self.ai_provider_order = []
         self.ai_generators_dir = os.path.join(os.path.dirname(__file__) if "__file__" in globals() else os.getcwd(), "ai_generators")
+        self.load_ai_plugins_enabled = __import__("tkinter").BooleanVar(value=False)  # FIX2 OFF by default - runs code!
         # AI Plugin config file - MUST be before load_ai_providers()
         self.ai_config_path = os.path.expanduser("~/.imageeditor_ai.json")
         self.pan_start = None
@@ -460,6 +472,19 @@ class ImageEditor:
             self.ai_provider_order.append(provider_id)
 
     def load_external_ai_plugins(self):
+        # FIX2: OFF by default - only load if enabled (security - runs code!)
+        try:
+            import json
+            if os.path.exists(self.ai_config_path):
+                with open(self.ai_config_path, "r") as f:
+                    cfg=json.load(f)
+                    if cfg.get("load_ai_plugins"):
+                        self.load_ai_plugins_enabled.set(True)
+        except:
+            pass
+        if not self.load_ai_plugins_enabled.get():
+            print("AI plugins disabled - enable in Manage Providers > checkbox (runs code!)")
+            return
         # Scan ai_generators/ for .py files that define register() function
         try:
             os.makedirs(self.ai_generators_dir, exist_ok=True)
@@ -4950,13 +4975,13 @@ Current Status:"""
             return
         try:
             self.push_undo(f"AI BG Replace: {prompt[:20]}")
-            # First remove background if rembg available
+            # First remove background if rembg available (lazy)
             layer = self.layers[self.active_layer_idx]
             img = layer.image.convert("RGBA")
-            if REMBG_AVAILABLE:
+            if _try_import_rembg():
                 try:
                     img_no_bg = rembg_remove(img)
-                except:
+                except BaseException:
                     img_no_bg = img
             else:
                 img_no_bg = img
@@ -4976,8 +5001,8 @@ Current Status:"""
 
         if not self.layers:
             return
-        if not REMBG_AVAILABLE:
-            messagebox.showinfo("AI", "rembg not installed. pip install rembg")
+        if not _try_import_rembg():
+            messagebox.showinfo("AI Remove BG", "rembg not available.\n\nInstall with:\n pip install \"rembg[cpu]\" onnxruntime")
             return
         try:
             self.push_undo("AI Remove BG")
