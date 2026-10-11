@@ -4328,6 +4328,10 @@ Current Status:"""
                 width = max(64, min(1024, w_var.get()))
                 height = max(64, min(1024, h_var.get()))
                 engine = engine_var.get()
+ if "Procedural" not in engine and "Local" not in engine:
+ if not __import__("tkinter").messagebox.askyesno("Send prompt online?", f"Send to {engine}?"):
+ status_var.set("Cancelled")
+ return
                 img = self.ai_generate_from_prompt(prompt, width, height, style_var.get(), engine, status_var)
                 if img:
                     self.push_undo(f"AI Generate: {prompt[:20]}")
