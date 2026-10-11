@@ -232,6 +232,7 @@ class ImageEditor:
         self.crop_start = None
         self.crop_rect_id = None
         self.crop_coords = None
+        self.crop_frac = None  # crop box as fractions of the image, so zoom/pan can't break it
         self.image_offset = (0, 0)
         self.display_size = (0, 0)
         self.lock_aspect = tk.BooleanVar(value=True)
@@ -2584,6 +2585,10 @@ def register(editor):
         self.image_offset = (x, y)
         self.display_size = (disp_w, disp_h)
         self.canvas.create_image(x, y, anchor="nw", image=self.photo)
+        if self.crop_frac and self.current_tool.get() == "crop":
+            fx0, fy0, fx1, fy1 = self.crop_frac
+            self.crop_coords = (x+fx0*disp_w, y+fy0*disp_h, x+fx1*disp_w, y+fy1*disp_h)
+            self.crop_rect_id = self.canvas.create_rectangle(*self.crop_coords, outline="#00ff00", width=2, dash=(4,4))
         self.zoom_label.config(text=f"Zoom: {int(self.zoom*100)}% | {w}x{h} -> {disp_w}x{disp_h} | Tool: {self.current_tool.get()}")
         self.update_resize_entries()
         # TIER 6B: Draw handles after image
@@ -3715,6 +3720,7 @@ def register(editor):
         if self.current_tool.get() != "crop" or not self.layers:
             return
         self.crop_start = (event.x, event.y)
+        self.crop_frac = None
         if self.crop_rect_id:
             self.canvas.delete(self.crop_rect_id)
 
@@ -3738,6 +3744,13 @@ def register(editor):
         x0,y0 = self.crop_start
         x1,y1 = event.x, event.y
         self.crop_coords = (min(x0,x1), min(y0,y1), max(x0,x1), max(y0,y1))
+        ox, oy = self.image_offset
+        dw, dh = self.display_size
+        if dw > 0 and dh > 0:
+            cx0, cy0, cx1, cy1 = self.crop_coords
+            cx0 = max(ox, min(ox+dw, cx0)); cx1 = max(ox, min(ox+dw, cx1))
+            cy0 = max(oy, min(oy+dh, cy0)); cy1 = max(oy, min(oy+dh, cy1))
+            self.crop_frac = ((cx0-ox)/dw, (cy0-oy)/dh, (cx1-ox)/dw, (cy1-oy)/dh)
         self.crop_start = None
 
     def apply_crop(self):
@@ -3745,13 +3758,16 @@ def register(editor):
             messagebox.showinfo("Crop", "Draw a crop box first (Crop tool, drag on image)")
             return
         try:
-            x0,y0,x1,y1 = self.crop_coords
-            ox, oy = self.image_offset
-            dw, dh = self.display_size
-            x0 = max(ox, min(ox+dw, x0)); x1 = max(ox, min(ox+dw, x1))
-            y0 = max(oy, min(oy+dh, y0)); y1 = max(oy, min(oy+dh, y1))
-            rx0 = (x0-ox)/dw; ry0 = (y0-oy)/dh
-            rx1 = (x1-ox)/dw; ry1 = (y1-oy)/dh
+            if self.crop_frac:
+                rx0, ry0, rx1, ry1 = self.crop_frac
+            else:
+                x0,y0,x1,y1 = self.crop_coords
+                ox, oy = self.image_offset
+                dw, dh = self.display_size
+                x0 = max(ox, min(ox+dw, x0)); x1 = max(ox, min(ox+dw, x1))
+                y0 = max(oy, min(oy+dh, y0)); y1 = max(oy, min(oy+dh, y1))
+                rx0 = (x0-ox)/dw; ry0 = (y0-oy)/dh
+                rx1 = (x1-ox)/dw; ry1 = (y1-oy)/dh
             self.push_undo("Crop")
             for layer in self.layers:
                 iw, ih = layer.image.size
@@ -3764,6 +3780,7 @@ def register(editor):
                     if layer.mask is not None:
                         layer.mask = layer.mask.crop((ix0,iy0,ix1,iy1))
             self.crop_coords = None
+            self.crop_frac = None
             if self.crop_rect_id:
                 self.canvas.delete(self.crop_rect_id)
                 self.crop_rect_id = None
