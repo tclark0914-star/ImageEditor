@@ -1,9 +1,6 @@
-﻿# Python
-__pycache__/
-*.py[cod]
+﻿__pycache__/
+*.pyc
+*.zip
+*.tar.gz
+venv/
 .venv/
-ai_generators/__pycache__/
-*.png
-!nigeria_super_eagles_goal.png
-.imageeditor_ai.json
-.vscode/
