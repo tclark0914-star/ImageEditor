@@ -2579,18 +2579,12 @@ def register(editor):
         return base
 
     def display_composite(self):
-        # TIER 8: If any adjustment layer exists, use get_composited_image for correct preview
-        has_adj = any(getattr(l, 'is_adjustment_layer', False) for l in self.layers) if self.layers else False
-        if has_adj:
-            comp = self.get_composited_image()
-            if comp:
-                self.composited_image = comp
-                # Now display comp
-                # Fall through to normal display logic using self.composited_image
-                # We'll let original logic run but override with comp at end
-                pass
-
-        comp = self.get_composite()
+                # Use adjusted composite when adjustment layers exist.
+        has_adj = any(
+            getattr(layer, "is_adjustment_layer", False)
+            for layer in self.layers
+        )
+        comp = self.get_composited_image() if has_adj else self.get_composite()
         if comp is None:
             return
         self.composited_image = comp
@@ -5518,39 +5512,139 @@ Current Status:"""
             if not layer.is_adjustment_layer:
                 messagebox.showinfo("Adjustment", "Select an Adjustment Layer!")
                 return
+
         d = tk.Toplevel(self.root)
-        d.title(f"Edit Adjustment: {layer.adjustment_type} - Tier 8")
-        d.geometry("400x300")
+        d.title(f"Edit Adjustment: {layer.adjustment_type}")
+        d.geometry("440x520")
         d.config(bg="#2b2b2b")
-        tk.Label(d, text=f"{layer.adjustment_type} - Non-Destructive Adjustment Layer", bg="#2b2b2b", fg="#ffcc00", font=("Segoe UI", 10, "bold")).pack(pady=10)
-        # Controls based on type
+
+        tk.Label(
+            d,
+            text=f"{layer.adjustment_type} - Non-Destructive Adjustment",
+            bg="#2b2b2b", fg="#ffcc00",
+            font=("Segoe UI", 10, "bold"),
+            wraplength=400
+        ).pack(pady=10)
+
+        def add_scale(label, variable, low, high, resolution=1):
+            tk.Label(d, text=label, bg="#2b2b2b", fg="white").pack()
+            tk.Scale(
+                d, from_=low, to=high, resolution=resolution,
+                variable=variable, orient="horizontal",
+                bg="#2b2b2b", fg="white", troughcolor="#555555",
+                highlightthickness=0, length=350
+            ).pack()
+
+        def apply_data(data):
+            layer.adjustment_data = data
+            self.display_composite()
+            d.destroy()
+
+        data = layer.adjustment_data
+
         if layer.adjustment_type == "brightness_contrast":
-            b_var = tk.DoubleVar(value=layer.adjustment_data.get("brightness", 1.0))
-            c_var = tk.DoubleVar(value=layer.adjustment_data.get("contrast", 1.0))
-            tk.Label(d, text="Brightness:", bg="#2b2b2b", fg="white").pack()
-            tk.Scale(d, from_=0.0, to=2.0, resolution=0.05, variable=b_var, orient="horizontal", bg="#2b2b2b", fg="white", troughcolor="#555555", length=300).pack()
-            tk.Label(d, text="Contrast:", bg="#2b2b2b", fg="white").pack()
-            tk.Scale(d, from_=0.0, to=2.0, resolution=0.05, variable=c_var, orient="horizontal", bg="#2b2b2b", fg="white", troughcolor="#555555", length=300).pack()
-            def apply():
-                layer.adjustment_data = {"brightness": b_var.get(), "contrast": c_var.get()}
-                self.display_composite()
-                d.destroy()
-            tk.Button(d, text="Apply", command=apply, bg="#ffcc00", fg="black").pack(pady=20, fill="x", padx=20)
+            b_var = tk.DoubleVar(value=data.get("brightness", 1.0))
+            c_var = tk.DoubleVar(value=data.get("contrast", 1.0))
+            add_scale("Brightness", b_var, 0.0, 2.0, 0.05)
+            add_scale("Contrast", c_var, 0.0, 2.0, 0.05)
+            tk.Button(
+                d, text="Apply",
+                command=lambda: apply_data({
+                    "brightness": b_var.get(),
+                    "contrast": c_var.get()
+                }),
+                bg="#ffcc00", fg="black"
+            ).pack(pady=18, fill="x", padx=25)
+
         elif layer.adjustment_type == "hue_sat":
-            h_var = tk.IntVar(value=layer.adjustment_data.get("hue", 0))
-            s_var = tk.DoubleVar(value=layer.adjustment_data.get("saturation", 1.0))
-            tk.Label(d, text="Hue Shift:", bg="#2b2b2b", fg="white").pack()
-            tk.Scale(d, from_=-180, to=180, variable=h_var, orient="horizontal", bg="#2b2b2b", fg="white", troughcolor="#555555", length=300).pack()
-            tk.Label(d, text="Saturation:", bg="#2b2b2b", fg="white").pack()
-            tk.Scale(d, from_=0.0, to=3.0, resolution=0.1, variable=s_var, orient="horizontal", bg="#2b2b2b", fg="white", troughcolor="#555555", length=300).pack()
-            def apply():
-                layer.adjustment_data = {"hue": h_var.get(), "saturation": s_var.get()}
-                self.display_composite()
-                d.destroy()
-            tk.Button(d, text="Apply", command=apply, bg="#ffcc00", fg="black").pack(pady=20, fill="x", padx=20)
+            h_var = tk.IntVar(value=data.get("hue", 0))
+            s_var = tk.DoubleVar(value=data.get("saturation", 1.0))
+            add_scale("Hue Shift", h_var, -180, 180)
+            add_scale("Saturation", s_var, 0.0, 3.0, 0.1)
+            tk.Button(
+                d, text="Apply",
+                command=lambda: apply_data({
+                    "hue": h_var.get(),
+                    "saturation": s_var.get()
+                }),
+                bg="#ffcc00", fg="black"
+            ).pack(pady=18, fill="x", padx=25)
+
+        elif layer.adjustment_type == "levels":
+            shadow_var = tk.IntVar(value=int(data.get("shadow", 0)))
+            mid_var = tk.DoubleVar(value=float(data.get("mid", 1.0)))
+            highlight_var = tk.IntVar(value=int(data.get("highlight", 255)))
+
+            add_scale("Shadows (black point)", shadow_var, 0, 254)
+            add_scale("Midtones (gamma)", mid_var, 0.1, 3.0, 0.1)
+            add_scale("Highlights (white point)", highlight_var, 1, 255)
+
+            tk.Button(
+                d, text="Apply Levels",
+                command=lambda: apply_data({
+                    "shadow": shadow_var.get(),
+                    "mid": mid_var.get(),
+                    "highlight": highlight_var.get()
+                }),
+                bg="#ffcc00", fg="black"
+            ).pack(pady=18, fill="x", padx=25)
+
+        elif layer.adjustment_type == "color_balance":
+            r_var = tk.IntVar(value=int(data.get("r", 0)))
+            g_var = tk.IntVar(value=int(data.get("g", 0)))
+            b_var = tk.IntVar(value=int(data.get("b", 0)))
+
+            add_scale("Red ↔ Cyan", r_var, -100, 100)
+            add_scale("Green ↔ Magenta", g_var, -100, 100)
+            add_scale("Blue ↔ Yellow", b_var, -100, 100)
+
+            tk.Button(
+                d, text="Apply Color Balance",
+                command=lambda: apply_data({
+                    "r": r_var.get(),
+                    "g": g_var.get(),
+                    "b": b_var.get()
+                }),
+                bg="#ffcc00", fg="black"
+            ).pack(pady=18, fill="x", padx=25)
+
+        elif layer.adjustment_type == "curves":
+            points = data.get("curves", [])
+            midpoint = 128
+            if points:
+                nearest = min(points, key=lambda point: abs(point[0] - 128))
+                midpoint = int(nearest[1])
+
+            mid_output_var = tk.IntVar(value=max(0, min(255, midpoint)))
+            tk.Label(
+                d,
+                text="Adjust the output brightness of midtones.",
+                bg="#2b2b2b", fg="white", wraplength=380
+            ).pack(pady=8)
+            add_scale("Midtone Output", mid_output_var, 0, 255)
+
+            tk.Button(
+                d, text="Apply Curves",
+                command=lambda: apply_data({
+                    "curves": [
+                        (0, 0),
+                        (128, mid_output_var.get()),
+                        (255, 255)
+                    ]
+                }),
+                bg="#ffcc00", fg="black"
+            ).pack(pady=18, fill="x", padx=25)
+
         else:
-            tk.Label(d, text=f"Adjustment {layer.adjustment_type} - Apply to all layers below", bg="#2b2b2b", fg="white", wraplength=350).pack(pady=20)
-            tk.Button(d, text="OK - Applied as Layer", command=d.destroy, bg="#4a4a4a", fg="white").pack(pady=10)
+            tk.Label(
+                d,
+                text=f"{layer.adjustment_type} has no editable controls here.",
+                bg="#2b2b2b", fg="white", wraplength=350
+            ).pack(pady=20)
+            tk.Button(
+                d, text="Close", command=d.destroy,
+                bg="#4a4a4a", fg="white"
+            ).pack(pady=10)
 
     # ----------------- 8C: TIMELINE / GIF -----------------
     def timeline_add_frame(self):
@@ -5625,36 +5719,105 @@ Current Status:"""
             messagebox.showerror("Export Error", str(e))
 
     def get_composited_image(self):
-        # Return current composited view
+        """Return the current composite with non-destructive adjustments."""
         if not self.layers:
             return None
-        # Reuse display_composite logic but return image
+
         base_w, base_h = self.layers[0].image.size
-        comp = Image.new("RGBA", (base_w, base_h), (0,0,0,0))
+        comp = Image.new("RGBA", (base_w, base_h), (0, 0, 0, 0))
+
         for layer in self.layers:
             if not layer.visible:
                 continue
+
             if layer.is_adjustment_layer:
-                # Apply adjustment to comp so far
+                data = layer.adjustment_data
+
                 if layer.adjustment_type == "brightness_contrast":
-                    b = layer.adjustment_data.get("brightness", 1.0)
-                    c = layer.adjustment_data.get("contrast", 1.0)
-                    comp = ImageEnhance.Brightness(comp).enhance(b)
-                    comp = ImageEnhance.Contrast(comp).enhance(c)
+                    comp = ImageEnhance.Brightness(comp).enhance(
+                        float(data.get("brightness", 1.0)))
+                    comp = ImageEnhance.Contrast(comp).enhance(
+                        float(data.get("contrast", 1.0)))
+
                 elif layer.adjustment_type == "hue_sat":
-                    # Simplified: just saturation
-                    s = layer.adjustment_data.get("saturation", 1.0)
-                    comp = ImageEnhance.Color(comp).enhance(s)
+                    comp = ImageEnhance.Color(comp).enhance(
+                        float(data.get("saturation", 1.0)))
+
                 elif layer.adjustment_type == "black_white":
-                    comp = ImageOps.grayscale(comp).convert("RGBA")
+                    gray = ImageOps.grayscale(comp)
+                    comp = gray.convert("RGBA")
+
+                elif layer.adjustment_type == "levels":
+                    shadow = float(data.get("shadow", 0))
+                    mid = max(0.01, float(data.get("mid", 1.0)))
+                    highlight = float(data.get("highlight", 255))
+                    if highlight > shadow:
+                        lut = []
+                        for value in range(256):
+                            x = max(0.0, min(1.0,
+                                (value - shadow) / (highlight - shadow)))
+                            lut.append(max(0, min(255,
+                                round((x ** (1.0 / mid)) * 255))))
+                        r, g, b, a = comp.split()
+                        comp = Image.merge("RGBA",
+                            (r.point(lut), g.point(lut), b.point(lut), a))
+
+                elif layer.adjustment_type == "color_balance":
+                    shifts = (
+                        int(data.get("r", 0)),
+                        int(data.get("g", 0)),
+                        int(data.get("b", 0)),
+                    )
+                    r, g, b, a = comp.split()
+                    channels = []
+                    for channel, shift in zip((r, g, b), shifts):
+                        lut = [max(0, min(255, value + shift))
+                               for value in range(256)]
+                        channels.append(channel.point(lut))
+                    comp = Image.merge("RGBA",
+                        (channels[0], channels[1], channels[2], a))
+
+                elif layer.adjustment_type == "curves":
+                    points = data.get("curves", [])
+                    if len(points) >= 2:
+                        points = sorted(
+                            (max(0, min(255, int(x))),
+                             max(0, min(255, int(y))))
+                            for x, y in points
+                        )
+                        lut = []
+                        for value in range(256):
+                            if value <= points[0][0]:
+                                result = points[0][1]
+                            elif value >= points[-1][0]:
+                                result = points[-1][1]
+                            else:
+                                result = value
+                                for (x0, y0), (x1, y1) in zip(
+                                        points, points[1:]):
+                                    if x0 <= value <= x1:
+                                        if x1 == x0:
+                                            result = y1
+                                        else:
+                                            fraction = (value - x0) / (x1 - x0)
+                                            result = y0 + fraction * (y1 - y0)
+                                        break
+                            lut.append(max(0, min(255, round(result))))
+                        r, g, b, a = comp.split()
+                        comp = Image.merge("RGBA",
+                            (r.point(lut), g.point(lut), b.point(lut), a))
                 continue
-            img = layer.get_styled_image() if hasattr(layer, 'get_styled_image') else layer.get_transformed_image()
-            # Apply offset
-            tmp = Image.new("RGBA", (base_w, base_h), (0,0,0,0))
-            tmp.paste(img, (int(layer.offset_x), int(layer.offset_y)), img if img.mode=="RGBA" else None)
-            # Blend
-            # Simplified normal blend
+
+            img = (layer.get_styled_image()
+                   if hasattr(layer, "get_styled_image")
+                   else layer.get_transformed_image())
+            tmp = Image.new("RGBA", (base_w, base_h), (0, 0, 0, 0))
+            if img.mode == "RGBA":
+                tmp.paste(img, (int(layer.offset_x), int(layer.offset_y)), img)
+            else:
+                tmp.paste(img, (int(layer.offset_x), int(layer.offset_y)))
             comp = Image.alpha_composite(comp, tmp)
+
         return comp
 
     # Override display_composite to handle adjustment layers + smart filters
